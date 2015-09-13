@@ -49,13 +49,13 @@
  *
  *				Notes on usage
  *
- * Before including this header, you must define 'pos_t' to an integer type that
- * can represent all possible positions.  This can be a 16-bit or 32-bit
+ * Before including this header, you must define 'mf_pos_t' to an integer type
+ * that can represent all possible positions.  This can be a 16-bit or 32-bit
  * unsigned integer.  When possible, the former should be used due to the
  * reduced cache pressure.  This header can be included multiple times in a
- * single .c file with different 'pos_t' definitions; however, you must define a
- * different MF_SUFFIX each time to generate different names for the matchfinder
- * structure and functions.
+ * single .c file with different 'mf_pos_t' definitions; however, you must
+ * define a different MF_SUFFIX each time to generate different names for the
+ * matchfinder structure and functions.
  *
  * The number of bytes that must be allocated for a given 'struct
  * hc_matchfinder' must be gotten by calling hc_matchfinder_size().
@@ -119,9 +119,9 @@
 #define TEMPLATED(name)		CONCAT(name, MF_SUFFIX)
 
 struct TEMPLATED(hc_matchfinder) {
-	pos_t hash3_tab[1UL << HC_MATCHFINDER_HASH3_ORDER];
-	pos_t hash4_tab[1UL << HC_MATCHFINDER_HASH4_ORDER];
-	pos_t next_tab[];
+	mf_pos_t hash3_tab[1UL << HC_MATCHFINDER_HASH3_ORDER];
+	mf_pos_t hash4_tab[1UL << HC_MATCHFINDER_HASH4_ORDER];
+	mf_pos_t next_tab[];
 };
 
 /* Return the number of bytes that must be allocated for a 'hc_matchfinder' that
@@ -130,7 +130,7 @@ static inline size_t
 TEMPLATED(hc_matchfinder_size)(size_t max_bufsize)
 {
 	return sizeof(struct TEMPLATED(hc_matchfinder)) +
-		(max_bufsize * sizeof(pos_t));
+		(max_bufsize * sizeof(mf_pos_t));
 }
 
 /* Prepare the matchfinder for a new input buffer.  */
@@ -186,8 +186,8 @@ TEMPLATED(hc_matchfinder_longest_match)(struct TEMPLATED(hc_matchfinder) * const
 	u32 next_seq3, next_seq4;
 	u32 hash3, hash4;
 	u32 seq4;
-	pos_t cur_node3;
-	pos_t cur_node4;
+	mf_pos_t cur_node3;
+	mf_pos_t cur_node4;
 	const u8 *matchptr;
 	u32 len;
 
