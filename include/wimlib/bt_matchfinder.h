@@ -175,6 +175,61 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	*next_hash = lz_hash(load_u24_unaligned(in_next + 1), BT_MATCHFINDER_HASH3_ORDER);
 	prefetchw(&mf->hash3_tab[*next_hash]);
 
+	u8 c = in_next[0];
+
+	if (in_next[1] == c) {
+		u32 run_length;
+		u32 run_idx;
+		struct run_tracker *r = &mf->run_trackers[c];
+
+		/* Run detected  */
+
+		/* Extend the run to the right.  */
+		for (run_length = 2;
+		     run_length < max_len && in_next[run_length] == c;
+		     run_length++)
+			;
+
+		/* Look for matches  */
+		run_idx = r->run_count - 1;
+		for (;;) {
+			if ((s32)run_idx < 0) {
+				/* no more runs --- stop  */
+				break;
+			}
+
+			if (r->runs[run_idx].length >= run_length) {
+				/* at least as long --- stop  */
+				if (record_matches) {
+					best_len = run_length;
+					lz_matchptr->length = run_length;
+					lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
+				}
+
+				if (r->runs[run_idx].length == run_length) {
+					/* replace */
+					r->runs[run_idx].pos = cur_pos;
+					r->run_count = run_idx + 1;
+				} else {
+					/* replace next */
+					r->runs[run_idx + 1].length = run_length;
+					r->runs[run_idx + 1].pos = cur_pos;
+					r->run_count = run_idx + 2;
+				}
+			} else {
+				/* shorter --- keep going  */
+				if (record_matches) {
+					best_len = r->runs[run_idx].length;
+					lz_matchptr->length = r->runs[run_idx].length;
+					lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
+				}
+			}
+		}
+		*best_len_ret = best_len;
+		return lz_matchptr;
+	}
+
+
 #ifdef BT_MATCHFINDER_HASH2_ORDER
 	best_len = 1;
 	seq2 = load_u16_unaligned(in_next);
@@ -303,53 +358,6 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      u32 *best_len_ret,
 				      struct lz_match *lz_matchptr)
 {
-	const u8 *in_next = in_begin + cur_pos;
-
-	u8 c = in_next[0];
-
-	if (in_next[1] == c) {
-		u32 run_length;
-		u32 run_idx;
-		struct run_tracker *r = &mf->run_trackers[c];
-
-		/* Run detected  */
-
-		/* Extend the run to the right.  */
-		for (run_length = 2;
-		     run_length < max_len && in_next[run_length] == c;
-		     run_length++)
-			;
-
-		/* Look for matches  */
-		run_idx = r->run_count - 1;
-		for (;;) {
-			if ((s32)run_idx < 0) {
-				/* no more runs --- stop  */
-				break;
-			}
-
-			if (r->runs[run_idx].length >= run_length) {
-				/* at least as long --- stop  */
-				lz_matchptr->length = run_length;
-				lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
-
-				if (r->runs[run_idx].length == run_length) {
-					r->runs[run_idx].pos = cur_pos;
-					r->run_count = run_idx + 1;
-				} else {
-					r->runs[run_idx + 1].pos = run_length;
-					r->runs[run_idx + 1].pos = cur_pos;
-					r->run_count = run_idx + 2;
-				}
-			} else {
-				/* shorter --- keep going  */
-				lz_matchptr->length = r->runs[run_idx].length;
-				lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
-			}
-		}
-		return lz_matchptr;
-	}
-
 	return TEMPLATED(bt_matchfinder_advance_one_byte)(mf,
 							  in_begin,
 							  cur_pos,
