@@ -77,6 +77,20 @@ struct lz_match {
 	u32 offset;
 };
 
+struct run {
+	u32 pos;
+	u32 length;
+};
+
+struct run_tracker {
+
+	/* Num runs in 'runs'  */
+	u32 run_count;
+
+	/* Runs: longest (farthest) to shortest (closest)  */
+	struct run runs[257];
+};
+
 #endif /* _WIMLIB_BT_MATCHFINDER_H */
 
 struct TEMPLATED(bt_matchfinder) {
@@ -89,6 +103,8 @@ struct TEMPLATED(bt_matchfinder) {
 	/* The hash table which contains the roots of the binary trees for
 	 * finding length 3 matches  */
 	mf_pos_t hash3_tab[1UL << BT_MATCHFINDER_HASH3_ORDER];
+
+	struct run_tracker run_trackers[256];
 
 	/* The child node references for the binary trees  */
 	mf_pos_t child_tab[];
@@ -287,6 +303,53 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      u32 *best_len_ret,
 				      struct lz_match *lz_matchptr)
 {
+	const u8 *in_next = in_begin + cur_pos;
+
+	u8 c = in_next[0];
+
+	if (in_next[1] == c) {
+		u32 run_length;
+		u32 run_idx;
+		struct run_tracker *r = &mf->run_trackers[c];
+
+		/* Run detected  */
+
+		/* Extend the run to the right.  */
+		for (run_length = 2;
+		     run_length < max_len && in_next[run_length] == c;
+		     run_length++)
+			;
+
+		/* Look for matches  */
+		run_idx = r->run_count - 1;
+		for (;;) {
+			if ((s32)run_idx < 0) {
+				/* no more runs --- stop  */
+				break;
+			}
+
+			if (r->runs[run_idx].length >= run_length) {
+				/* at least as long --- stop  */
+				lz_matchptr->length = run_length;
+				lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
+
+				if (r->runs[run_idx].length == run_length) {
+					r->runs[run_idx].pos = cur_pos;
+					r->run_count = run_idx + 1;
+				} else {
+					r->runs[run_idx + 1].pos = run_length;
+					r->runs[run_idx + 1].pos = cur_pos;
+					r->run_count = run_idx + 2;
+				}
+			} else {
+				/* shorter --- keep going  */
+				lz_matchptr->length = r->runs[run_idx].length;
+				lz_matchptr->offset = cur_pos - r->runs[run_idx].pos;
+			}
+		}
+		return lz_matchptr;
+	}
+
 	return TEMPLATED(bt_matchfinder_advance_one_byte)(mf,
 							  in_begin,
 							  cur_pos,
