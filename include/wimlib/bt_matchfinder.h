@@ -12,14 +12,14 @@
  * This is a Binary Trees (bt) based matchfinder.
  *
  * The main data structure is a hash table where each hash bucket contains a
- * binary tree of sequences whose first 3 bytes share the same hash code.  Each
+ * binary tree of sequences whose first 4 bytes share the same hash code.  Each
  * sequence is identified by its starting position in the input buffer.  Each
  * binary tree is always sorted such that each left child represents a sequence
  * lexicographically lesser than its parent and each right child represents a
  * sequence lexicographically greater than its parent.
  *
  * The algorithm processes the input buffer sequentially.  At each byte
- * position, the hash code of the first 3 bytes of the sequence beginning at
+ * position, the hash code of the first 4 bytes of the sequence beginning at
  * that position (the sequence being matched against) is computed.  This
  * identifies the hash bucket to use for that position.  Then, a new binary tree
  * node is created to represent the current sequence.  Then, in a single tree
@@ -51,7 +51,8 @@
 #include "wimlib/lz_extend.h"
 #include "wimlib/lz_hash.h"
 
-#define BT_MATCHFINDER_HASH3_ORDER 16
+#define BT_MATCHFINDER_HASH3_ORDER 15
+#define BT_MATCHFINDER_HASH4_ORDER 16
 
 /* TEMPLATED functions and structures have MF_SUFFIX appended to their name.  */
 #undef TEMPLATED
@@ -81,9 +82,12 @@ struct TEMPLATED(bt_matchfinder) {
 	mf_pos_t hash2_tab[1UL << BT_MATCHFINDER_HASH2_ORDER];
 #endif
 
-	/* The hash table which contains the roots of the binary trees for
-	 * finding length 3 matches  */
+	/* The hash table for finding length 3 matches  */
 	mf_pos_t hash3_tab[1UL << BT_MATCHFINDER_HASH3_ORDER];
+
+	/* The hash table which contains the roots of the binary trees for
+	 * finding length 4 matches  */
+	mf_pos_t hash4_tab[1UL << BT_MATCHFINDER_HASH4_ORDER];
 
 	/* The child node references for the binary trees.  The left and right
 	 * children of the node for the sequence with position 'pos' are
@@ -128,28 +132,38 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 					   const u32 max_len,
 					   const u32 nice_len,
 					   const u32 max_search_depth,
-					   u32 * const restrict next_hash,
+					   u32 next_hashes[const restrict static 2],
 					   u32 * const restrict best_len_ret,
 					   struct lz_match * restrict lz_matchptr,
 					   const bool record_matches)
 {
 	const u8 *in_next = in_begin + cur_pos;
 	u32 depth_remaining = max_search_depth;
+	u32 next_seq4;
+	u32 next_seq3;
+	u32 hash3;
+	u32 hash4;
 #ifdef BT_MATCHFINDER_HASH2_ORDER
 	u16 seq2;
 	u32 hash2;
 #endif
-	u32 hash3;
 	u32 cur_node;
 	const u8 *matchptr;
 	mf_pos_t *pending_lt_ptr, *pending_gt_ptr;
 	u32 best_lt_len, best_gt_len;
 	u32 len;
-	u32 best_len = 2;
+	u32 best_len = 3;
 
-	hash3 = *next_hash;
-	*next_hash = lz_hash(load_u24_unaligned(in_next + 1), BT_MATCHFINDER_HASH3_ORDER);
-	prefetchw(&mf->hash3_tab[*next_hash]);
+	next_seq4 = load_u32_unaligned(in_next + 1);
+	next_seq3 = loaded_u32_to_u24(next_seq4);
+
+	hash3 = next_hashes[0];
+	hash4 = next_hashes[1];
+
+	next_hashes[0] = lz_hash(next_seq3, BT_MATCHFINDER_HASH3_ORDER);
+	next_hashes[1] = lz_hash(next_seq4, BT_MATCHFINDER_HASH4_ORDER);
+	prefetchw(&mf->hash3_tab[next_hashes[0]]);
+	prefetchw(&mf->hash4_tab[next_hashes[1]]);
 
 #ifdef BT_MATCHFINDER_HASH2_ORDER
 	seq2 = load_u16_unaligned(in_next);
@@ -168,6 +182,17 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 
 	cur_node = mf->hash3_tab[hash3];
 	mf->hash3_tab[hash3] = cur_pos;
+	if (record_matches &&
+	    load_u24_unaligned(in_next) == load_u24_unaligned(&in_begin[cur_node]) &&
+	    likely(in_next != in_begin))
+	{
+		lz_matchptr->length = 3;
+		lz_matchptr->offset = in_next - &in_begin[cur_node];
+		lz_matchptr++;
+	}
+
+	cur_node = mf->hash4_tab[hash4];
+	mf->hash4_tab[hash4] = cur_pos;
 
 	pending_lt_ptr = TEMPLATED(bt_left_child)(mf, cur_pos);
 	pending_gt_ptr = TEMPLATED(bt_right_child)(mf, cur_pos);
@@ -252,7 +277,7 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
  *	one position in advance so that the binary tree root could be
  *	prefetched.  This is an input/output parameter.
  * @best_len_ret
- *	If a match of length >= 3 was found, then the length of the longest such
+ *	If a match of length >= 4 was found, then the length of the longest such
  *	match is written here; otherwise 2 is written here.  (Note: this is
  *	redundant with the 'struct lz_match' array, but this is easier for the
  *	compiler to optimize when inlined and the caller immediately does a
@@ -274,7 +299,7 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      u32 max_len,
 				      u32 nice_len,
 				      u32 max_search_depth,
-				      u32 *next_hash,
+				      u32 next_hashes[static 2],
 				      u32 *best_len_ret,
 				      struct lz_match *lz_matchptr)
 {
@@ -284,7 +309,7 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 							  max_len,
 							  nice_len,
 							  max_search_depth,
-							  next_hash,
+							  next_hashes,
 							  best_len_ret,
 							  lz_matchptr,
 							  true);
@@ -321,7 +346,7 @@ TEMPLATED(bt_matchfinder_skip_position)(struct TEMPLATED(bt_matchfinder) *mf,
 					u32 max_len,
 					u32 nice_len,
 					u32 max_search_depth,
-					u32 *next_hash)
+					u32 next_hashes[static 2])
 {
 	u32 best_len;
 	TEMPLATED(bt_matchfinder_advance_one_byte)(mf,
@@ -330,7 +355,7 @@ TEMPLATED(bt_matchfinder_skip_position)(struct TEMPLATED(bt_matchfinder) *mf,
 						   max_len,
 						   nice_len,
 						   max_search_depth,
-						   next_hash,
+						   next_hashes,
 						   &best_len,
 						   NULL,
 						   false);
