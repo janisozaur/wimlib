@@ -38,7 +38,7 @@
  * significantly better than the greedy and lazy algorithms.  However, it is
  * much slower.
  */
-#define SUPPORT_NEAR_OPTIMAL_PARSING	1
+#define SUPPORT_NEAR_OPTIMAL_PARSING	0
 
 /*
  * The lowest compression level at which near-optimal parsing is enabled.

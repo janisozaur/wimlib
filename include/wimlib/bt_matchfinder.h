@@ -67,7 +67,10 @@
 struct lz_match {
 
 	/* The number of bytes matched.  */
-	u32 length;
+	u16 length;
+
+	/* The compression format-specific offset slot  */
+	u16 offset_slot;
 
 	/* The offset back from the current position that was matched.  */
 	u32 offset;
@@ -134,6 +137,8 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 					   const u32 max_search_depth,
 					   u32 next_hashes[const restrict static 2],
 					   u32 * const restrict best_len_ret,
+					   unsigned (*get_offset_slot_fn)(void *, u32),
+					   void *get_offset_slot_ctx,
 					   struct lz_match * restrict lz_matchptr,
 					   const bool record_matches)
 {
@@ -153,6 +158,7 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	u32 best_lt_len, best_gt_len;
 	u32 len;
 	u32 best_len = 3;
+	unsigned best_offset_slot = -1;
 
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_seq3 = loaded_u32_to_u24(next_seq4);
@@ -174,9 +180,13 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	    seq2 == load_u16_unaligned(&in_begin[cur_node]) &&
 	    likely(in_next != in_begin))
 	{
+		u32 offset = in_next - &in_begin[cur_node];
+		unsigned offset_slot = (*get_offset_slot_fn)(get_offset_slot_ctx, offset);
 		lz_matchptr->length = 2;
-		lz_matchptr->offset = in_next - &in_begin[cur_node];
+		lz_matchptr->offset = offset;
+		lz_matchptr->offset_slot = offset_slot;
 		lz_matchptr++;
+		best_offset_slot = offset_slot;
 	}
 #endif
 
@@ -186,9 +196,15 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	    load_u24_unaligned(in_next) == load_u24_unaligned(&in_begin[cur_node]) &&
 	    likely(in_next != in_begin))
 	{
+		u32 offset = in_next - &in_begin[cur_node];
+		unsigned offset_slot = (*get_offset_slot_fn)(get_offset_slot_ctx, offset);
+
+		lz_matchptr -= (offset_slot == best_offset_slot);
 		lz_matchptr->length = 3;
-		lz_matchptr->offset = in_next - &in_begin[cur_node];
+		lz_matchptr->offset = offset;
+		lz_matchptr->offset_slot = offset_slot;
 		lz_matchptr++;
+		best_offset_slot = offset_slot;
 	}
 
 	cur_node = mf->hash4_tab[hash4];
@@ -216,10 +232,17 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 					(record_matches ? max_len : nice_len));
 			if (!record_matches || len > best_len) {
 				if (record_matches) {
-					best_len = len;
+
+					u32 offset = in_next - matchptr;
+					unsigned offset_slot = (*get_offset_slot_fn)(get_offset_slot_ctx, offset);
+
+					lz_matchptr -= (offset_slot == best_offset_slot);
 					lz_matchptr->length = len;
-					lz_matchptr->offset = in_next - matchptr;
+					lz_matchptr->offset = offset;
+					lz_matchptr->offset_slot = offset_slot;
 					lz_matchptr++;
+					best_len = len;
+					best_offset_slot = offset_slot;
 				}
 				if (len >= nice_len) {
 					*pending_lt_ptr = *TEMPLATED(bt_left_child)(mf, cur_node);
@@ -301,6 +324,8 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      u32 max_search_depth,
 				      u32 next_hashes[static 2],
 				      u32 *best_len_ret,
+				      unsigned (*get_offset_slot_fn)(void *, u32),
+				      void *get_offset_slot_ctx,
 				      struct lz_match *lz_matchptr)
 {
 	return TEMPLATED(bt_matchfinder_advance_one_byte)(mf,
@@ -311,6 +336,8 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 							  max_search_depth,
 							  next_hashes,
 							  best_len_ret,
+							  get_offset_slot_fn,
+							  get_offset_slot_ctx,
 							  lz_matchptr,
 							  true);
 }
@@ -357,6 +384,8 @@ TEMPLATED(bt_matchfinder_skip_position)(struct TEMPLATED(bt_matchfinder) *mf,
 						   max_search_depth,
 						   next_hashes,
 						   &best_len,
+						   NULL,
+						   NULL,
 						   NULL,
 						   false);
 }

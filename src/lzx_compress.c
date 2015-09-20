@@ -1552,10 +1552,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 
 			/* Consider explicit offset matches  */
 			do {
-				u32 offset = cache_ptr->offset;
-				u32 offset_data = offset + LZX_OFFSET_ADJUSTMENT;
-				unsigned offset_slot = lzx_comp_get_offset_slot(c, offset_data,
-										is_16_bit);
+				u32 offset_data = cache_ptr->offset + LZX_OFFSET_ADJUSTMENT;
+				u32 *costs = &c->costs.match_cost[cache_ptr->offset_slot][-2];
 				u32 base_cost = cur_node->cost;
 
 			#if LZX_CONSIDER_ALIGNED_COSTS
@@ -1565,9 +1563,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 			#endif
 
 				do {
-					u32 cost = base_cost +
-						   c->costs.match_cost[offset_slot][
-								next_len - LZX_MIN_MATCH_LEN];
+					u32 cost = base_cost + costs[next_len];
 					if (cost < (cur_node + next_len)->cost) {
 						(cur_node + next_len)->cost = cost;
 						(cur_node + next_len)->item =
@@ -1757,6 +1753,13 @@ lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
 	return new_queue;
 }
 
+static inline unsigned
+lzx_bt_get_offset_slot_func(void *ctx, u32 offset)
+{
+	struct lzx_compressor *c = ctx;
+	return lzx_comp_get_offset_slot(c, offset + LZX_OFFSET_ADJUSTMENT, true);
+}
+
 /*
  * This is the "near-optimal" LZX compressor.
  *
@@ -1820,6 +1823,8 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 						 c->max_search_depth,
 						 next_hashes,
 						 &best_len,
+						 lzx_bt_get_offset_slot_func,
+						 c,
 						 cache_ptr + 1);
 			in_next++;
 			cache_ptr->length = lz_matchptr - (cache_ptr + 1);
