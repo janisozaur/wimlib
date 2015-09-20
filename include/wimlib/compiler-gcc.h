@@ -40,6 +40,15 @@
 #  endif
 #endif
 
+#ifdef __SIZEOF_SIZE_T__
+#  define CPU_IS_64BIT (__SIZEOF_SIZE_T__ == 8)
+#elif defined(HAVE_CONFIG_H)
+#  include "config.h"
+#  ifdef SIZEOF_SIZE_T
+#    define CPU_IS_64BIT (SIZEOF_SIZE_T == 8)
+#  endif
+#endif
+
 #if defined(__x86_64__) || defined(__i386__)
 #  define UNALIGNED_ACCESS_SPEED 3
 #elif defined(__ARM_FEATURE_UNALIGNED) && (__ARM_FEATURE_UNALIGNED == 1)

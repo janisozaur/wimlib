@@ -75,6 +75,10 @@
 
 #define CPU_IS_LITTLE_ENDIAN (!CPU_IS_BIG_ENDIAN)
 
+#ifndef CPU_IS_64BIT
+#  error "missing required word size definition"
+#endif
+
 #ifndef UNALIGNED_ACCESS_SPEED
 #  define UNALIGNED_ACCESS_SPEED 0
 #endif
