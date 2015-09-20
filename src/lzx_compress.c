@@ -1796,6 +1796,7 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 		struct lz_match *cache_ptr = c->match_cache;
 		do {
 			struct lz_match *lz_matchptr;
+			u32 num_matches;
 			u32 best_len;
 
 			/* If approaching the end of the input buffer, adjust
@@ -1822,8 +1823,52 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 						 &best_len,
 						 cache_ptr + 1);
 			in_next++;
-			cache_ptr->length = lz_matchptr - (cache_ptr + 1);
-			cache_ptr = lz_matchptr;
+			num_matches = lz_matchptr - (cache_ptr + 1);
+
+			/* if NEXT match has same offset slot, then merge with NEXT  */
+			if (num_matches > 1) {
+				unsigned cur_offset_slot;
+				unsigned next_offset_slot;
+				u32 new_num_matches = 0;
+				u32 cur_idx = 1;
+				u32 next_idx = 2;
+
+				/*printf("Before:\n");*/
+				/*for (u32 i = 1; i <= num_matches; i++)*/
+					/*printf("\tLen %u Offset %u\n", cache_ptr[i].length, cache_ptr[i].offset);*/
+
+				cur_offset_slot = lzx_comp_get_offset_slot(c,
+									   cache_ptr[cur_idx].offset + LZX_OFFSET_ADJUSTMENT,
+									   is_16_bit);
+				do {
+					next_offset_slot = lzx_comp_get_offset_slot(c,
+										    cache_ptr[next_idx].offset + LZX_OFFSET_ADJUSTMENT,
+										    is_16_bit);
+
+					cache_ptr[1 + new_num_matches] = cache_ptr[cur_idx];
+
+					new_num_matches += (cur_offset_slot != next_offset_slot);
+
+					cur_offset_slot = next_offset_slot;
+					cur_idx = next_idx;
+
+				} while (++next_idx <= num_matches);
+
+				cache_ptr[1 + new_num_matches++] = cache_ptr[cur_idx];
+
+				/*printf("%c %u => %u\n", (new_num_matches < num_matches ? '*' : ' '),*/
+				       /*num_matches, new_num_matches);*/
+
+				/*printf("After:\n");*/
+				/*for (u32 i = 1; i <= new_num_matches; i++)*/
+					/*printf("\tLen %u Offset %u\n", cache_ptr[i].length, cache_ptr[i].offset);*/
+
+				cache_ptr->length = new_num_matches;
+				cache_ptr += 1 + new_num_matches;
+			} else {
+				cache_ptr->length = num_matches;
+				cache_ptr = lz_matchptr;
+			}
 
 			/*
 			 * If there was a very long match found, then don't
