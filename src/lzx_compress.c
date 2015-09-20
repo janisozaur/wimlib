@@ -247,33 +247,6 @@ struct lzx_sequence {
  * each outgoing edge from this node is labeled with a literal or a match that
  * can be taken to advance from this position to a later position.
  */
-struct lzx_optimum_node {
-
-	/* The cost, in bits, of the lowest-cost path that has been found to
-	 * reach this position.  This can change as progressively lower cost
-	 * paths are found to reach this position.  */
-	u32 cost;
-
-	/*
-	 * The match or literal that was taken to reach this position.  This can
-	 * change as progressively lower cost paths are found to reach this
-	 * position.
-	 *
-	 * This variable is divided into two bitfields.
-	 *
-	 * Literals:
-	 *	Low bits are 0, high bits are the literal.
-	 *
-	 * Explicit offset matches:
-	 *	Low bits are the match length, high bits are the offset plus 2.
-	 *
-	 * Repeat offset matches:
-	 *	Low bits are the match length, high bits are the queue index.
-	 */
-	u32 item;
-#define OPTIMUM_OFFSET_SHIFT 9
-#define OPTIMUM_LEN_MASK ((1 << OPTIMUM_OFFSET_SHIFT) - 1)
-} _aligned_attribute(8);
 
 /*
  * Least-recently-used queue for match offsets.
@@ -450,7 +423,9 @@ struct lzx_compressor {
 			 * chosen for the block, it makes no difference what
 			 * their costs are initialized to (if anything).
 			 */
-			struct lzx_optimum_node optimum_nodes[LZX_DIV_BLOCK_SIZE +
+			u32 optimum_costs[LZX_DIV_BLOCK_SIZE +
+							      LZX_MAX_MATCH_LEN - 1 + 1];
+			u32 optimum_items[LZX_DIV_BLOCK_SIZE +
 							      LZX_MAX_MATCH_LEN - 1 + 1];
 
 			/* The cost model for the current block  */
@@ -1221,6 +1196,10 @@ lzx_finish_sequence(struct lzx_sequence *last_seq, u32 litrunlen)
 	last_seq->adjusted_offset_and_match_hdr = 0x80000000;
 }
 
+
+#define OPTIMUM_OFFSET_SHIFT	9
+#define OPTIMUM_LEN_MASK 	((1 << OPTIMUM_OFFSET_SHIFT) - 1)
+
 /*
  * Given the minimum-cost path computed through the item graph for the current
  * block, walk the path and count how many of each symbol in each Huffman-coded
@@ -1244,7 +1223,7 @@ lzx_tally_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
 		/* Tally literals until either a match or the beginning of the
 		 * block is reached.  */
 		for (;;) {
-			u32 item = c->optimum_nodes[node_idx].item;
+			u32 item = c->optimum_items[node_idx];
 
 			len = item & OPTIMUM_LEN_MASK;
 			offset_data = item >> OPTIMUM_OFFSET_SHIFT;
@@ -1313,7 +1292,7 @@ lzx_record_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
 		/* Record literals until either a match or the beginning of the
 		 * block is reached.  */
 		for (;;) {
-			u32 item = c->optimum_nodes[node_idx].item;
+			u32 item = c->optimum_items[node_idx];
 
 			len = item & OPTIMUM_LEN_MASK;
 			offset_data = item >> OPTIMUM_OFFSET_SHIFT;
@@ -1410,8 +1389,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		       const struct lzx_lru_queue initial_queue,
 		       bool is_16_bit)
 {
-	struct lzx_optimum_node *cur_node = c->optimum_nodes;
-	struct lzx_optimum_node * const end_node = &c->optimum_nodes[block_size];
+	u32 cur_idx = 0;
+	u32 end_idx = block_size;
 	struct lz_match *cache_ptr = c->match_cache;
 	const u8 *in_next = block_begin;
 	const u8 * const block_end = block_begin + block_size;
@@ -1428,8 +1407,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 #define QUEUE(in) (queues[(uintptr_t)(in) % ARRAY_LEN(queues)])
 
 	/* Initially, the cost to reach each node is "infinity".  */
-	memset(c->optimum_nodes, 0xFF,
-	       (block_size + 1) * sizeof(c->optimum_nodes[0]));
+	memset(c->optimum_costs, 0xFF,
+	       (block_size + 1) * sizeof(c->optimum_costs[0]));
 
 	QUEUE(block_begin) = initial_queue;
 
@@ -1478,12 +1457,12 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				goto R0_done;
 			STATIC_ASSERT(LZX_MIN_MATCH_LEN == 2);
 			do {
-				u32 cost = cur_node->cost +
+				u32 cost = c->optimum_costs[cur_idx] +
 					   c->costs.match_cost[0][
 							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
+				if (cost <= c->optimum_costs[cur_idx + next_len]) {
+					c->optimum_costs[cur_idx + next_len] = cost;
+					c->optimum_items[cur_idx + next_len] =
 						(0 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
 				if (unlikely(++next_len > max_len)) {
@@ -1504,12 +1483,12 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				if (matchptr[len] != in_next[len])
 					goto R1_done;
 			do {
-				u32 cost = cur_node->cost +
+				u32 cost = c->optimum_costs[cur_idx] +
 					   c->costs.match_cost[1][
 							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
+				if (cost <= c->optimum_costs[cur_idx + next_len]) {
+					c->optimum_costs[cur_idx + next_len] = cost;
+					c->optimum_items[cur_idx + next_len] =
 						(1 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
 				if (unlikely(++next_len > max_len)) {
@@ -1530,12 +1509,12 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				if (matchptr[len] != in_next[len])
 					goto R2_done;
 			do {
-				u32 cost = cur_node->cost +
+				u32 cost = c->optimum_costs[cur_idx] +
 					   c->costs.match_cost[2][
 							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
+				if (cost <= c->optimum_costs[cur_idx + next_len]) {
+					c->optimum_costs[cur_idx + next_len] = cost;
+					c->optimum_items[cur_idx + next_len] =
 						(2 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
 				if (unlikely(++next_len > max_len)) {
@@ -1556,7 +1535,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				u32 offset_data = offset + LZX_OFFSET_ADJUSTMENT;
 				unsigned offset_slot = lzx_comp_get_offset_slot(c, offset_data,
 										is_16_bit);
-				u32 base_cost = cur_node->cost;
+				u32 base_cost = c->optimum_costs[cur_idx];
 
 			#if LZX_CONSIDER_ALIGNED_COSTS
 				if (offset_data >= 16)
@@ -1568,9 +1547,9 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					u32 cost = base_cost +
 						   c->costs.match_cost[offset_slot][
 								next_len - LZX_MIN_MATCH_LEN];
-					if (cost < (cur_node + next_len)->cost) {
-						(cur_node + next_len)->cost = cost;
-						(cur_node + next_len)->item =
+					if (cost < c->optimum_costs[cur_idx + next_len]) {
+						c->optimum_costs[cur_idx + next_len] = cost;
+						c->optimum_items[cur_idx + next_len] =
 							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
 					}
 				} while (++next_len <= cache_ptr->length);
@@ -1585,24 +1564,24 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		 * of coding the literal is integrated into the queue update
 		 * code below.  */
 		literal = *in_next++;
-		cost = cur_node->cost + c->costs.main[literal];
+		cost = c->optimum_costs[cur_idx] + c->costs.main[literal];
 
 		/* Advance to the next position.  */
-		cur_node++;
+		cur_idx++;
 
 		/* The lowest-cost path to the current position is now known.
 		 * Finalize the recent offsets queue that results from taking
 		 * this lowest-cost path.  */
 
-		if (cost <= cur_node->cost) {
+		if (cost <= c->optimum_costs[cur_idx]) {
 			/* Literal: queue remains unchanged.  */
-			cur_node->cost = cost;
-			cur_node->item = (u32)literal << OPTIMUM_OFFSET_SHIFT;
+			c->optimum_costs[cur_idx] = cost;
+			c->optimum_items[cur_idx] = (u32)literal << OPTIMUM_OFFSET_SHIFT;
 			QUEUE(in_next) = QUEUE(in_next - 1);
 		} else {
 			/* Match: queue update is needed.  */
-			unsigned len = cur_node->item & OPTIMUM_LEN_MASK;
-			u32 offset_data = cur_node->item >> OPTIMUM_OFFSET_SHIFT;
+			unsigned len = c->optimum_items[cur_idx] & OPTIMUM_LEN_MASK;
+			u32 offset_data = c->optimum_items[cur_idx] >> OPTIMUM_OFFSET_SHIFT;
 			if (offset_data >= LZX_NUM_RECENT_OFFSETS) {
 				/* Explicit offset match: insert offset at front  */
 				QUEUE(in_next) =
@@ -1615,7 +1594,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 							   offset_data);
 			}
 		}
-	} while (cur_node != end_node);
+	} while (cur_idx != end_idx);
 
 	/* Return the match offset queue at the end of the minimum cost path. */
 	return QUEUE(block_end);
