@@ -143,6 +143,8 @@
 #define ALIGNED_CODEWORD_LIMIT	7
 #define PRE_CODEWORD_LIMIT	7
 
+#include <immintrin.h>
+
 #include "wimlib/compress_common.h"
 #include "wimlib/compressor_ops.h"
 #include "wimlib/error.h"
@@ -1407,8 +1409,9 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 #define QUEUE(in) (queues[(uintptr_t)(in) % ARRAY_LEN(queues)])
 
 	/* Initially, the cost to reach each node is "infinity".  */
-	memset(c->optimum_costs, 0xFF,
-	       (block_size + 1) * sizeof(c->optimum_costs[0]));
+	c->optimum_costs[0] = 0;
+	for (u32 i = 1; i <= block_size; i++)
+		c->optimum_costs[i] = 0x0FFFFFFF;
 
 	QUEUE(block_begin) = initial_queue;
 
@@ -1543,6 +1546,55 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 								      LZX_ALIGNED_OFFSET_BITMASK];
 			#endif
 
+			#if 1
+				if (cache_ptr->length - next_len >= 3) {
+					__m128i base_costs = _mm_set1_epi32(base_cost);
+					do {
+						__m128i costs = _mm_loadu_si128((__m128i *)
+									&c->costs.match_cost
+										[offset_slot]
+										[next_len - LZX_MIN_MATCH_LEN]);
+						__m128i new_costs = _mm_add_epi32(base_costs, costs);
+						__m128i new_items = _mm_add_epi32(_mm_set1_epi32(
+								((offset_data << OPTIMUM_OFFSET_SHIFT) | next_len)
+									), _mm_set_epi32(3, 2, 1, 0));
+
+						__m128i prev_costs = _mm_loadu_si128((__m128i *)
+										&c->optimum_costs
+										[cur_idx + next_len]);
+						__m128i prev_items = _mm_loadu_si128((__m128i *)
+										&c->optimum_items
+										[cur_idx + next_len]);
+
+						__m128i best_costs = _mm_min_epi32(new_costs, prev_costs);
+
+						__m128i masks = _mm_cmplt_epi32(new_costs, prev_costs);
+
+
+						__m128i best_items = _mm_or_si128(_mm_and_si128(new_items, masks),
+										  _mm_andnot_si128(masks, prev_items));
+
+						_mm_storeu_si128((__m128i *) &c->optimum_costs [cur_idx + next_len],
+								 best_costs);
+						_mm_storeu_si128((__m128i *) &c->optimum_items [cur_idx + next_len],
+								 best_items);
+
+						next_len += 4;
+
+					} while ((s32)(cache_ptr->length - next_len) >= 3);
+				}
+				while (next_len <= cache_ptr->length) {
+					u32 cost = base_cost +
+						   c->costs.match_cost[offset_slot][
+								next_len - LZX_MIN_MATCH_LEN];
+					if (cost < c->optimum_costs[cur_idx + next_len]) {
+						c->optimum_costs[cur_idx + next_len] = cost;
+						c->optimum_items[cur_idx + next_len] =
+							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
+					}
+					++next_len;
+				}
+			#else
 				do {
 					u32 cost = base_cost +
 						   c->costs.match_cost[offset_slot][
@@ -1552,7 +1604,9 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 						c->optimum_items[cur_idx + next_len] =
 							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
 					}
+					++next_len;
 				} while (++next_len <= cache_ptr->length);
+			#endif
 			} while (++cache_ptr != end_matches);
 		}
 
