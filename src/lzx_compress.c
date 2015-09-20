@@ -1372,6 +1372,17 @@ out:
 	return seq_idx;
 }
 
+#define EDGE_STEP(base_cost, offset_slot, offset_data)			\
+	u32 cost = (base_cost) +					\
+		   c->costs.match_cost[offset_slot][			\
+				next_len - LZX_MIN_MATCH_LEN];		\
+	if (cost <= (cur_node + next_len)->cost) {			\
+		(cur_node + next_len)->cost = cost;			\
+		(cur_node + next_len)->item =				\
+			(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;\
+	}								\
+	next_len++;
+
 /*
  * Find an inexpensive path through the graph of possible match/literal choices
  * for the current block.  The nodes of the graph are
@@ -1480,15 +1491,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				goto R0_done;
 			STATIC_ASSERT(LZX_MIN_MATCH_LEN == 2);
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[0][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(0 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len))
+				EDGE_STEP(cur_node->cost, 0, 0);
+				if (unlikely(next_len > max_len))
 					goto done_matches;
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
@@ -1504,15 +1508,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				if (matchptr[len] != in_next[len])
 					goto R1_done;
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[1][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(1 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len))
+				EDGE_STEP(cur_node->cost, 1, 1);
+				if (unlikely(next_len > max_len))
 					goto done_matches;
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
@@ -1528,15 +1525,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 				if (matchptr[len] != in_next[len])
 					goto R2_done;
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[2][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(2 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len))
+				EDGE_STEP(cur_node->cost, 2, 2);
+				if (unlikely(next_len > max_len))
 					goto done_matches;
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
@@ -1561,15 +1551,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 			#endif
 
 				do {
-					u32 cost = base_cost +
-						   c->costs.match_cost[offset_slot][
-								next_len - LZX_MIN_MATCH_LEN];
-					if (cost < (cur_node + next_len)->cost) {
-						(cur_node + next_len)->cost = cost;
-						(cur_node + next_len)->item =
-							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
-					}
-				} while (++next_len <= matches->length);
+					EDGE_STEP(base_cost, offset_slot, offset_data);
+				} while (next_len <= matches->length);
 				offset = (++matches)->offset;
 			} while (offset != 0);
 		}
