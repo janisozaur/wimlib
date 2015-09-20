@@ -1467,10 +1467,12 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		cache_ptr++;
 
 		if (num_matches) {
-			struct lz_match *end_matches = cache_ptr + num_matches;
 			unsigned next_len = LZX_MIN_MATCH_LEN;
 			unsigned max_len = min(block_end - in_next, LZX_MAX_MATCH_LEN);
 			const u8 *matchptr;
+			const struct lz_match *matches = cache_ptr;
+
+			cache_ptr += num_matches;
 
 			/* Consider R0 match  */
 			matchptr = in_next - lzx_lru_queue_R0(QUEUE(in_next));
@@ -1486,10 +1488,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(0 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R0_done:
@@ -1512,10 +1512,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(1 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R1_done:
@@ -1538,21 +1536,19 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(2 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R2_done:
 
-			while (next_len > cache_ptr->length)
-				if (++cache_ptr == end_matches)
+			while (next_len > matches->length)
+				if ((++matches)->offset == 0)
 					goto done_matches;
 
 			/* Consider explicit offset matches  */
+			u32 offset = matches->offset;
 			do {
-				u32 offset = cache_ptr->offset;
 				u32 offset_data = offset + LZX_OFFSET_ADJUSTMENT;
 				unsigned offset_slot = lzx_comp_get_offset_slot(c, offset_data,
 										is_16_bit);
@@ -1573,8 +1569,9 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 						(cur_node + next_len)->item =
 							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
 					}
-				} while (++next_len <= cache_ptr->length);
-			} while (++cache_ptr != end_matches);
+				} while (++next_len <= matches->length);
+				offset = (++matches)->offset;
+			} while (offset != 0);
 		}
 
 	done_matches:
@@ -1806,6 +1803,7 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 				if (unlikely(max_len < 5)) {
 					in_next++;
 					cache_ptr->length = 0;
+					cache_ptr->offset = 0;
 					cache_ptr++;
 					continue;
 				}
@@ -1823,6 +1821,7 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 						 cache_ptr + 1);
 			in_next++;
 			cache_ptr->length = lz_matchptr - (cache_ptr + 1);
+			cache_ptr->offset = 0;
 			cache_ptr = lz_matchptr;
 
 			/*
@@ -1846,6 +1845,7 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 						if (unlikely(max_len < 5)) {
 							in_next++;
 							cache_ptr->length = 0;
+							cache_ptr->offset = 0;
 							cache_ptr++;
 							continue;
 						}
@@ -1859,6 +1859,7 @@ lzx_compress_near_optimal(struct lzx_compressor *c,
 						   next_hashes);
 					in_next++;
 					cache_ptr->length = 0;
+					cache_ptr->offset = 0;
 					cache_ptr++;
 				} while (--best_len);
 			}
