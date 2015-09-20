@@ -1302,14 +1302,14 @@ begin:
 		if (likely(in_next - c->in_buffer >= LZMS_NUM_LZ_REPS &&
 			   in_end - in_next >= 2))
 		{
-			const int rep_adjustment = cur_node->state.prev_item_type & 1;
+			const u32 *offsets = &cur_node->state.recent_lz_offsets[(cur_node->state.prev_item_type & 1)];
 
 			for (int rep_idx = 0; rep_idx < LZMS_NUM_LZ_REPS; rep_idx++) {
 
 				/* Looking for a repeat offset LZ match at queue
 				 * index @rep_idx  */
 
-				const u32 offset = cur_node->state.recent_lz_offsets[rep_idx + rep_adjustment];
+				const u32 offset = offsets[rep_idx];
 				const u8 * const matchptr = in_next - offset;
 
 				/* Check the first 2 bytes before entering the extension loop.  */
@@ -1330,7 +1330,7 @@ begin:
 					c->optimum_nodes[0].state = cur_node->state;
 					cur_node = &c->optimum_nodes[0];
 
-					for (int i = rep_idx + rep_adjustment; i > 0; i--)
+					for (int i = rep_idx + (cur_node->state.prev_item_type & 1); i > 0; i--)
 						cur_node->state.recent_lz_offsets[i] =
 							cur_node->state.recent_lz_offsets[i - 1];
 					cur_node->state.recent_lz_offsets[0] = offset;
@@ -1445,14 +1445,14 @@ begin:
 		    likely(in_next - c->in_buffer >= LZMS_NUM_DELTA_REPS + 1 &&
 			   (in_end - in_next >= 2)))
 		{
-			const int rep_adjustment = cur_node->state.prev_item_type >> 1;
+			const u32 *pairs = &cur_node->state.recent_delta_pairs[(cur_node->state.prev_item_type >> 1)];
 
 			for (int rep_idx = 0; rep_idx < LZMS_NUM_DELTA_REPS; rep_idx++) {
 
 				/* Looking for a repeat offset delta match at
 				 * queue index @rep_idx  */
 
-				const u32 pair = cur_node->state.recent_delta_pairs[rep_idx + rep_adjustment];
+				const u32 pair = pairs[rep_idx];
 				const u32 power = pair >> DELTA_SOURCE_POWER_SHIFT;
 				const u32 raw_offset = pair & DELTA_SOURCE_RAW_OFFSET_MASK;
 				const u32 span = (u32)1 << power;
@@ -1483,7 +1483,7 @@ begin:
 					c->optimum_nodes[0].state = cur_node->state;
 					cur_node = &c->optimum_nodes[0];
 
-					for (int i = rep_idx + rep_adjustment; i > 0; i--)
+					for (int i = rep_idx + (cur_node->state.prev_item_type >> 1); i > 0; i--)
 						cur_node->state.recent_delta_pairs[i] =
 							cur_node->state.recent_delta_pairs[i - 1];
 					cur_node->state.recent_delta_pairs[0] = pair;
