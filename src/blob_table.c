@@ -528,45 +528,6 @@ sort_blob_list_by_sequential_order(struct list_head *blob_list,
 			      cmp_blobs_by_sequential_order);
 }
 
-static int
-add_blob_to_array(struct blob_descriptor *blob, void *_pp)
-{
-	struct blob_descriptor ***pp = _pp;
-	*(*pp)++ = blob;
-	return 0;
-}
-
-/* Iterate through the blob descriptors in the specified blob table in an order
- * optimized for sequential reading.  */
-int
-for_blob_in_table_sorted_by_sequential_order(struct blob_table *table,
-					     int (*visitor)(struct blob_descriptor *, void *),
-					     void *arg)
-{
-	struct blob_descriptor **blob_array, **p;
-	size_t num_blobs = table->num_blobs;
-	int ret;
-
-	blob_array = MALLOC(num_blobs * sizeof(blob_array[0]));
-	if (!blob_array)
-		return WIMLIB_ERR_NOMEM;
-	p = blob_array;
-	for_blob_in_table(table, add_blob_to_array, &p);
-
-	wimlib_assert(p == blob_array + num_blobs);
-
-	qsort(blob_array, num_blobs, sizeof(blob_array[0]),
-	      cmp_blobs_by_sequential_order);
-	ret = 0;
-	for (size_t i = 0; i < num_blobs; i++) {
-		ret = visitor(blob_array[i], arg);
-		if (ret)
-			break;
-	}
-	FREE(blob_array);
-	return ret;
-}
-
 /* On-disk format of a blob descriptor in a WIM file.
  *
  * Note: if the WIM file contains solid resource(s), then this structure is

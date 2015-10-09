@@ -77,7 +77,6 @@ libwim_la_SOURCES =		\
 	src/security.c		\
 	src/sha1.c		\
 	src/solid.c		\
-	src/split.c		\
 	src/reparse.c		\
 	src/tagged_items.c	\
 	src/template.c		\

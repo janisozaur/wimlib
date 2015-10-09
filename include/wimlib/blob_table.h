@@ -325,11 +325,6 @@ extern int
 for_blob_in_table(struct blob_table *table,
 		  int (*visitor)(struct blob_descriptor *, void *), void *arg);
 
-extern int
-for_blob_in_table_sorted_by_sequential_order(struct blob_table *table,
-					     int (*visitor)(struct blob_descriptor *, void *),
-					     void *arg);
-
 struct wimlib_resource_entry;
 
 extern void

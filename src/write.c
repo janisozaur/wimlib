@@ -56,6 +56,29 @@
 #include "wimlib/write.h"
 #include "wimlib/xml.h"
 
+/* Keep in sync with wimlib.h  */
+#define WIMLIB_WRITE_MASK_PUBLIC (			  \
+	WIMLIB_WRITE_FLAG_CHECK_INTEGRITY		| \
+	WIMLIB_WRITE_FLAG_NO_CHECK_INTEGRITY		| \
+	WIMLIB_WRITE_FLAG_PIPABLE			| \
+	WIMLIB_WRITE_FLAG_NOT_PIPABLE			| \
+	WIMLIB_WRITE_FLAG_RECOMPRESS			| \
+	WIMLIB_WRITE_FLAG_FSYNC				| \
+	WIMLIB_WRITE_FLAG_REBUILD			| \
+	WIMLIB_WRITE_FLAG_SOFT_DELETE			| \
+	WIMLIB_WRITE_FLAG_IGNORE_READONLY_FLAG		| \
+	WIMLIB_WRITE_FLAG_SKIP_EXTERNAL_WIMS		| \
+	WIMLIB_WRITE_FLAG_STREAMS_OK			| \
+	WIMLIB_WRITE_FLAG_RETAIN_GUID			| \
+	WIMLIB_WRITE_FLAG_SOLID				| \
+	WIMLIB_WRITE_FLAG_SEND_DONE_WITH_FILE_MESSAGES	| \
+	WIMLIB_WRITE_FLAG_NO_SOLID_SORT			| \
+	WIMLIB_WRITE_FLAG_UNSAFE_COMPACT)
+
+/* Internal use only */
+#define WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR	0x80000000
+#define WIMLIB_WRITE_FLAG_APPEND		0x40000000
+#define WIMLIB_WRITE_FLAG_NO_NEW_BLOBS		0x20000000
 
 /* wimlib internal flags used when writing resources.  */
 #define WRITE_RESOURCE_FLAG_RECOMPRESS		0x00000001
@@ -2154,9 +2177,6 @@ write_metadata_resources(WIMStruct *wim, int image, int write_flags)
 	int end_image;
 	int write_resource_flags;
 
-	if (write_flags & WIMLIB_WRITE_FLAG_NO_METADATA)
-		return 0;
-
 	write_resource_flags = write_flags_to_resource_flags(write_flags);
 
 	write_resource_flags &= ~WRITE_RESOURCE_FLAG_SOLID;
@@ -2270,6 +2290,8 @@ write_blob_table(WIMStruct *wim, int image, int write_flags,
 		 struct list_head *blob_table_list)
 {
 	int ret;
+	int start_image;
+	int end_image;
 
 	/* Set output resource metadata for blobs already present in WIM.  */
 	if (write_flags & WIMLIB_WRITE_FLAG_APPEND) {
@@ -2290,29 +2312,24 @@ write_blob_table(WIMStruct *wim, int image, int write_flags,
 		return ret;
 
 	/* Add entries for metadata resources.  */
-	if (!(write_flags & WIMLIB_WRITE_FLAG_NO_METADATA)) {
-		int start_image;
-		int end_image;
+	if (image == WIMLIB_ALL_IMAGES) {
+		start_image = 1;
+		end_image = wim->hdr.image_count;
+	} else {
+		start_image = image;
+		end_image = image;
+	}
 
-		if (image == WIMLIB_ALL_IMAGES) {
-			start_image = 1;
-			end_image = wim->hdr.image_count;
-		} else {
-			start_image = image;
-			end_image = image;
-		}
+	/* Push metadata blob table entries onto the front of the list
+	 * in reverse order, so that they're written in order.
+	 */
+	for (int i = end_image; i >= start_image; i--) {
+		struct blob_descriptor *metadata_blob;
 
-		/* Push metadata blob table entries onto the front of the list
-		 * in reverse order, so that they're written in order.
-		 */
-		for (int i = end_image; i >= start_image; i--) {
-			struct blob_descriptor *metadata_blob;
-
-			metadata_blob = wim->image_metadata[i - 1]->metadata_blob;
-			wimlib_assert(metadata_blob->out_reshdr.flags & WIM_RESHDR_FLAG_METADATA);
-			metadata_blob->out_refcnt = 1;
-			list_add(&metadata_blob->blob_table_list, blob_table_list);
-		}
+		metadata_blob = wim->image_metadata[i - 1]->metadata_blob;
+		wimlib_assert(metadata_blob->out_reshdr.flags & WIM_RESHDR_FLAG_METADATA);
+		metadata_blob->out_refcnt = 1;
+		list_add(&metadata_blob->blob_table_list, blob_table_list);
 	}
 
 	return write_blob_table_from_blob_list(blob_table_list,
@@ -2387,7 +2404,7 @@ finish_write(WIMStruct *wim, int image, int write_flags,
 
 	/* Write XML data.  */
 	xml_totalbytes = wim->out_fd.offset;
-	if (write_flags & WIMLIB_WRITE_FLAG_USE_EXISTING_TOTALBYTES)
+	if (0)//write_flags & WIMLIB_WRITE_FLAG_USE_EXISTING_TOTALBYTES)
 		xml_totalbytes = WIM_TOTALBYTES_USE_EXISTING;
 	ret = write_wim_xml_data(wim, image, xml_totalbytes,
 				 &wim->out_hdr.xml_data_reshdr,
@@ -2639,37 +2656,21 @@ should_default_to_solid_compression(WIMStruct *wim, int write_flags)
 		wim_has_solid_resources(wim);
 }
 
-/* Write a standalone WIM or split WIM (SWM) part to a new file or to a file
- * descriptor.  */
-int
-write_wim_part(WIMStruct *wim,
-	       const void *path_or_fd,
-	       int image,
-	       int write_flags,
-	       unsigned num_threads,
-	       unsigned part_number,
-	       unsigned total_parts,
-	       struct list_head *blob_list_override,
-	       const u8 *guid)
+static int
+write_wim(WIMStruct *wim, const void *path_or_fd, int image,
+	  int write_flags, unsigned num_threads, u64 part_size)
 {
 	int ret;
 	struct list_head blob_table_list;
-
-	/* Internally, this is always called with a valid part number and total
-	 * parts.  */
-	wimlib_assert(total_parts >= 1);
-	wimlib_assert(part_number >= 1 && part_number <= total_parts);
 
 	/* A valid image (or all images) must be specified.  */
 	if (image != WIMLIB_ALL_IMAGES &&
 	     (image < 1 || image > wim->hdr.image_count))
 		return WIMLIB_ERR_INVALID_IMAGE;
 
-	/* If we need to write metadata resources, make sure the ::WIMStruct has
-	 * the needed information attached (e.g. is not a resource-only WIM,
-	 * such as a non-first part of a split WIM).  */
-	if (!wim_has_metadata(wim) &&
-	    !(write_flags & WIMLIB_WRITE_FLAG_NO_METADATA))
+	/* Make sure the WIMStruct has the needed information attached (e.g.  is
+	 * not a resource-only WIM, such as a non-first part of a split WIM). */
+	if (!wim_has_metadata(wim))
 		return WIMLIB_ERR_METADATA_NOT_FOUND;
 
 	/* Check for contradictory flags.  */
@@ -2683,6 +2684,11 @@ write_wim_part(WIMStruct *wim,
 			    WIMLIB_WRITE_FLAG_NOT_PIPABLE))
 				== (WIMLIB_WRITE_FLAG_PIPABLE |
 				    WIMLIB_WRITE_FLAG_NOT_PIPABLE))
+		return WIMLIB_ERR_INVALID_PARAM;
+
+	/* A split WIM can't be written to a file descriptor.  */
+	if ((write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) &&
+	    (part_size != 0))
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	/* Only wimlib_overwrite() accepts UNSAFE_COMPACT.  */
@@ -2739,8 +2745,6 @@ write_wim_part(WIMStruct *wim,
 	/* Set the header flags.  */
 	wim->out_hdr.flags = (wim->hdr.flags & (WIM_HDR_FLAG_RP_FIX |
 						WIM_HDR_FLAG_READONLY));
-	if (total_parts != 1)
-		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
 	if (wim->out_compression_type != WIMLIB_COMPRESSION_TYPE_NONE) {
 		wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESSION;
 		switch (wim->out_compression_type) {
@@ -2761,15 +2765,9 @@ write_wim_part(WIMStruct *wim,
 
 	/* Set the GUID.  */
 	if (write_flags & WIMLIB_WRITE_FLAG_RETAIN_GUID)
-		guid = wim->hdr.guid;
-	if (guid)
-		copy_guid(wim->out_hdr.guid, guid);
+		copy_guid(wim->out_hdr.guid, wim->hdr.guid);
 	else
 		generate_guid(wim->out_hdr.guid);
-
-	/* Set the part number and total parts.  */
-	wim->out_hdr.part_number = part_number;
-	wim->out_hdr.total_parts = total_parts;
 
 	/* Set the image count.  */
 	if (image == WIMLIB_ALL_IMAGES)
@@ -2778,18 +2776,28 @@ write_wim_part(WIMStruct *wim,
 		wim->out_hdr.image_count = 1;
 
 	/* Set the boot index.  */
-	wim->out_hdr.boot_idx = 0;
-	if (total_parts == 1) {
-		if (image == WIMLIB_ALL_IMAGES)
-			wim->out_hdr.boot_idx = wim->hdr.boot_idx;
-		else if (image == wim->hdr.boot_idx)
-			wim->out_hdr.boot_idx = 1;
-	}
+	if (image == WIMLIB_ALL_IMAGES)
+		wim->out_hdr.boot_idx = wim->hdr.boot_idx;
+	else if (image == wim->hdr.boot_idx)
+		wim->out_hdr.boot_idx = 1;
+	else
+		wim->out_hdr.boot_idx = 0;
+
+	/* SPLIT BEGIN  */
+
+	if (part_size)
+		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
+	/*wim->out_hdr.part_number = part_number;*/
+	/*wim->out_hdr.total_parts = total_parts;*/
 
 	/* Set up the output file descriptor.  */
 	if (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) {
 		/* File descriptor was explicitly provided.  */
-		filedes_init(&wim->out_fd, *(const int *)path_or_fd);
+		int fd = *(const int *)path_or_fd;
+
+		if (fd < 0)
+			return WIMLIB_ERR_INVALID_PARAM;
+		filedes_init(&wim->out_fd, fd);
 		if (!filedes_is_seekable(&wim->out_fd)) {
 			/* The file descriptor is a pipe.  */
 			ret = WIMLIB_ERR_INVALID_PARAM;
@@ -2804,8 +2812,10 @@ write_wim_part(WIMStruct *wim,
 	} else {
 		/* Filename of WIM to write was provided; open file descriptor
 		 * to it.  */
-		ret = open_wim_writable(wim, (const tchar*)path_or_fd,
-					O_TRUNC | O_CREAT | O_RDWR);
+		const tchar *path = path_or_fd;
+		if (!path || !*path)
+			return WIMLIB_ERR_INVALID_PARAM;
+		ret = open_wim_writable(wim, path, O_TRUNC | O_CREAT | O_RDWR);
 		if (ret)
 			goto out_cleanup;
 	}
@@ -2825,7 +2835,7 @@ write_wim_part(WIMStruct *wim,
 		/* Default case: create a normal (non-pipable) WIM.  */
 		ret = write_file_data(wim, image, write_flags,
 				      num_threads,
-				      blob_list_override,
+				      NULL,
 				      &blob_table_list);
 		if (ret)
 			goto out_cleanup;
@@ -2836,7 +2846,7 @@ write_wim_part(WIMStruct *wim,
 	} else {
 		/* Non-default case: create pipable WIM.  */
 		ret = write_pipable_wim(wim, image, write_flags, num_threads,
-					blob_list_override,
+					NULL,
 					&blob_table_list);
 		if (ret)
 			goto out_cleanup;
@@ -2844,48 +2854,51 @@ write_wim_part(WIMStruct *wim,
 
 	/* Write blob table, XML data, and (optional) integrity table.  */
 	ret = finish_write(wim, image, write_flags, &blob_table_list);
+
 out_cleanup:
 	(void)close_wim_writable(wim, write_flags);
 	return ret;
 }
 
-/* Write a standalone WIM to a file or file descriptor.  */
-static int
-write_standalone_wim(WIMStruct *wim, const void *path_or_fd,
-		     int image, int write_flags, unsigned num_threads)
-{
-	return write_wim_part(wim, path_or_fd, image, write_flags,
-			      num_threads, 1, 1, NULL, NULL);
-}
-
 /* API function documented in wimlib.h  */
 WIMLIBAPI int
-wimlib_write(WIMStruct *wim, const tchar *path,
-	     int image, int write_flags, unsigned num_threads)
+wimlib_write(WIMStruct *wim, const tchar *path, int image, int write_flags,
+	     unsigned num_threads)
 {
 	if (write_flags & ~WIMLIB_WRITE_MASK_PUBLIC)
 		return WIMLIB_ERR_INVALID_PARAM;
 
-	if (path == NULL || path[0] == T('\0'))
-		return WIMLIB_ERR_INVALID_PARAM;
-
-	return write_standalone_wim(wim, path, image, write_flags, num_threads);
+	return write_wim(wim, path, image, write_flags, num_threads, 0);
 }
 
 /* API function documented in wimlib.h  */
 WIMLIBAPI int
-wimlib_write_to_fd(WIMStruct *wim, int fd,
-		   int image, int write_flags, unsigned num_threads)
+wimlib_write_to_fd(WIMStruct *wim, int fd, int image, int write_flags,
+		   unsigned num_threads)
 {
 	if (write_flags & ~WIMLIB_WRITE_MASK_PUBLIC)
-		return WIMLIB_ERR_INVALID_PARAM;
-
-	if (fd < 0)
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	write_flags |= WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR;
 
-	return write_standalone_wim(wim, &fd, image, write_flags, num_threads);
+	return write_wim(wim, &fd, image, write_flags, num_threads, 0);
+}
+
+/* API function documented in wimlib.h  */
+WIMLIBAPI int
+wimlib_split(WIMStruct *wim, const tchar *swm_name, u64 part_size,
+	     int write_flags)
+{
+	if (write_flags & ~WIMLIB_WRITE_MASK_PUBLIC)
+		return WIMLIB_ERR_INVALID_PARAM;
+
+	if (!part_size)
+		return WIMLIB_ERR_INVALID_PARAM;
+
+	write_flags |= WIMLIB_WRITE_FLAG_RETAIN_GUID;
+
+	return write_wim(wim, swm_name, WIMLIB_ALL_IMAGES, write_flags,
+			 0, part_size);
 }
 
 /* Might we need to write blobs for at least one image?  */
