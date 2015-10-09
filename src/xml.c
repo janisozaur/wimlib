@@ -1267,15 +1267,12 @@ write_wim_xml_data(WIMStruct *wim, int image, u64 total_bytes,
 
 	/* Write the XML data uncompressed.  Although wimlib can handle
 	 * compressed XML data, some other WIM software cannot.  */
-	ret = write_wim_resource_from_buffer(xmlBufferContent(buffer),
-					     xmlBufferLength(buffer),
-					     true,
-					     &wim->out_fd,
-					     WIMLIB_COMPRESSION_TYPE_NONE,
-					     0,
-					     out_reshdr,
-					     NULL,
-					     write_resource_flags);
+	ret = write_uncompressed_resource(xmlBufferContent(buffer),
+					  xmlBufferLength(buffer),
+					  true,
+					  &wim->out_fd,
+					  out_reshdr,
+					  write_resource_flags);
 out_free_buffer:
 	xmlBufferFree(buffer);
 out_restore_document:

@@ -24,14 +24,11 @@ struct filedes;
 struct wim_reshdr;
 
 extern int
-write_wim_resource_from_buffer(const void *buf,
-			       size_t buf_size,
-			       bool is_metadata,
-			       struct filedes *out_fd,
-			       int out_ctype,
-			       u32 out_chunk_size,
-			       struct wim_reshdr *out_reshdr,
-			       u8 *hash_ret,
-			       int write_resource_flags);
+write_uncompressed_resource(const void *buf,
+			    size_t buf_size,
+			    bool is_metadata,
+			    struct filedes *out_fd,
+			    struct wim_reshdr *out_reshdr,
+			    int write_resource_flags);
 
 #endif /* _WIMLIB_WRITE_H */

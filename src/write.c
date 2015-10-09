@@ -359,15 +359,20 @@ do_write_blobs_progress(struct write_blobs_progress_data *progress_data,
 }
 
 struct write_blobs_ctx {
-	/* File descriptor to which the blobs are being written.  */
+	WIMStruct *wim;
+
+	int image;
+
 	struct filedes *out_fd;
+
+	int write_flags;
 
 	/* Blob table for the WIMStruct on whose behalf the blobs are being
 	 * written.  */
 	struct blob_table *blob_table;
 
 	/* The list of written blobs which is being collected  */
-	struct list_head *blob_table_list;
+	struct list_head blob_table_list;
 
 	/* The maximum part size in bytes (for writing split WIMs)  */
 	u64 max_part_size;
@@ -1146,27 +1151,20 @@ write_blob_end_read(struct blob_descriptor *blob, int status, void *_ctx)
  * really should be checked earlier, but for now it's easiest to check here.
  */
 static int
-compute_blob_list_stats(struct list_head *blob_list,
-			struct write_blobs_ctx *ctx)
+tally_blob_list_stats(struct list_head *blob_list,
+		      struct write_blobs_ctx *ctx)
 {
 	struct blob_descriptor *blob;
-	u64 total_bytes = 0;
-	u64 num_blobs = 0;
-	u64 total_parts = 0;
 	WIMStruct *prev_wim_part = NULL;
 	const struct wim_resource_descriptor *prev_rdesc = NULL;
 
 	list_for_each_entry(blob, blob_list, write_blobs_list) {
-		num_blobs++;
-		total_bytes += blob->size;
+		ctx->progress_data.progress.write_streams.total_streams++;
+		ctx->progress_data.progress.write_streams.total_bytes += blob->size;
 		if (blob->blob_location == BLOB_IN_WIM) {
 			const struct wim_resource_descriptor *rdesc = blob->rdesc;
 			WIMStruct *wim = rdesc->wim;
 
-			if (prev_wim_part != wim) {
-				prev_wim_part = wim;
-				total_parts++;
-			}
 			if (unlikely(wim->being_compacted) && rdesc != prev_rdesc) {
 				if (prev_rdesc != NULL &&
 				    rdesc->offset_in_wim <
@@ -1180,16 +1178,12 @@ compute_blob_list_stats(struct list_head *blob_list,
 				}
 				prev_rdesc = rdesc;
 			}
+			if (prev_wim_part != wim && !blob->is_metadata) {
+				prev_wim_part = wim;
+				ctx->progress_data.progress.write_streams.total_parts++;
+			}
 		}
 	}
-	ctx->progress_data.progress.write_streams.total_bytes       = total_bytes;
-	ctx->progress_data.progress.write_streams.total_streams     = num_blobs;
-	ctx->progress_data.progress.write_streams.completed_bytes   = 0;
-	ctx->progress_data.progress.write_streams.completed_streams = 0;
-	ctx->progress_data.progress.write_streams.compression_type  = ctx->out_ctype;
-	ctx->progress_data.progress.write_streams.total_parts       = total_parts;
-	ctx->progress_data.progress.write_streams.completed_parts   = 0;
-	ctx->progress_data.next_progress = 0;
 	return 0;
 }
 
@@ -1359,17 +1353,6 @@ finish_remaining_chunks(struct write_blobs_ctx *ctx)
 	return 0;
 }
 
-static void
-validate_blob_list(struct list_head *blob_list)
-{
-	struct blob_descriptor *blob;
-
-	list_for_each_entry(blob, blob_list, write_blobs_list) {
-		wimlib_assert(blob->will_be_in_output_wim);
-		wimlib_assert(blob->size != 0);
-	}
-}
-
 static inline bool
 blob_is_in_file(const struct blob_descriptor *blob)
 {
@@ -1400,198 +1383,65 @@ init_done_with_file_info(struct list_head *blob_list)
 			blob->file_inode->i_num_remaining_streams++;
 }
 
-/*
- * Write a list of blobs to the output WIM file.
- *
- * @blob_list
- *	The list of blobs to write, specified by a list of 'struct blob_descriptor' linked
- *	by the 'write_blobs_list' member.
- *
- * @out_fd
- *	The file descriptor, opened for writing, to which to write the blobs.
- *
- * @write_resource_flags
- *	Flags to modify how the blobs are written:
- *
- *	WRITE_RESOURCE_FLAG_RECOMPRESS:
- *		Force compression of all resources, even if they could otherwise
- *		be re-used by copying the raw data, due to being located in a WIM
- *		file with compatible compression parameters.
- *
- *	WRITE_RESOURCE_FLAG_PIPABLE:
- *		Write the resources in the wimlib-specific pipable format, and
- *		furthermore do so in such a way that no seeking backwards in
- *		@out_fd will be performed (so it may be a pipe).
- *
- *	WRITE_RESOURCE_FLAG_SOLID:
- *		Combine all the blobs into a single resource rather than writing
- *		them in separate resources.  This flag is only valid if the WIM
- *		version number has been, or will be, set to WIM_VERSION_SOLID.
- *		This flag may not be combined with WRITE_RESOURCE_FLAG_PIPABLE.
- *
- * @out_ctype
- *	Compression format to use in the output resources, specified as one of
- *	the WIMLIB_COMPRESSION_TYPE_* constants.  WIMLIB_COMPRESSION_TYPE_NONE
- *	is allowed.
- *
- * @out_chunk_size
- *	Compression chunk size to use in the output resources.  It must be a
- *	valid chunk size for the specified compression format @out_ctype, unless
- *	@out_ctype is WIMLIB_COMPRESSION_TYPE_NONE, in which case this parameter
- *	is ignored.
- *
- * @num_threads
- *	Number of threads to use to compress data.  If 0, a default number of
- *	threads will be chosen.  The number of threads still may be decreased
- *	from the specified value if insufficient memory is detected.
- *
- * @blob_table
- *	If on-the-fly deduplication of unhashed blobs is desired, this parameter
- *	must be pointer to the blob table for the WIMStruct on whose behalf the
- *	blobs are being written.  Otherwise, this parameter can be NULL.
- *
- * @filter_ctx
- *	If on-the-fly deduplication of unhashed blobs is desired, this parameter
- *	can be a pointer to a context for blob filtering used to detect whether
- *	the duplicate blob has been hard-filtered or not.  If no blobs are
- *	hard-filtered or no blobs are unhashed, this parameter can be NULL.
- *
- * This function will write the blobs in @blob_list to resources in
- * consecutive positions in the output WIM file, or to a single solid resource
- * if WRITE_RESOURCE_FLAG_SOLID was specified in @write_resource_flags.  In both
- * cases, the @out_reshdr of the `struct blob_descriptor' for each blob written will be
- * updated to specify its location, size, and flags in the output WIM.  In the
- * solid resource case, WIM_RESHDR_FLAG_SOLID will be set in the @flags field of
- * each @out_reshdr, and furthermore @out_res_offset_in_wim and
- * @out_res_size_in_wim of each @out_reshdr will be set to the offset and size,
- * respectively, in the output WIM of the solid resource containing the
- * corresponding blob.
- *
- * Each of the blobs to write may be in any location supported by the
- * resource-handling code (specifically, read_blob_list()), such as the contents
- * of external file that has been logically added to the output WIM, or a blob
- * in another WIM file that has been imported, or even a blob in the "same" WIM
- * file of which a modified copy is being written.  In the case that a blob is
- * already in a WIM file and uses compatible compression parameters, by default
- * this function will re-use the raw data instead of decompressing it, then
- * recompressing it; however, with WRITE_RESOURCE_FLAG_RECOMPRESS
- * specified in @write_resource_flags, this is not done.
- *
- * As a further requirement, this function requires that the
- * @will_be_in_output_wim member be set to 1 on all blobs in @blob_list as well
- * as any other blobs not in @blob_list that will be in the output WIM file, but
- * set to 0 on any other blobs in the output WIM's blob table or sharing a solid
- * resource with a blob in @blob_list.  Still furthermore, if on-the-fly
- * deduplication of blobs is possible, then all blobs in @blob_list must also be
- * linked by @blob_table_list along with any other blobs that have
- * @will_be_in_output_wim set.
- *
- * This function handles on-the-fly deduplication of blobs for which SHA-1
- * message digests have not yet been calculated.  Such blobs may or may not need
- * to be written.  If @blob_table is non-NULL, then each blob in @blob_list that
- * has @unhashed set but not @unique_size set is checksummed immediately before
- * it would otherwise be read for writing in order to determine if it is
- * identical to another blob already being written or one that would be filtered
- * out of the output WIM using blob_filtered() with the context @filter_ctx.
- * Each such duplicate blob will be removed from @blob_list, its reference count
- * transfered to the pre-existing duplicate blob, its memory freed, and will not
- * be written.  Alternatively, if a blob in @blob_list is a duplicate with any
- * blob in @blob_table that has not been marked for writing or would not be
- * hard-filtered, it is freed and the pre-existing duplicate is written instead,
- * taking ownership of the reference count and slot in the @blob_table_list.
- *
- * Returns 0 if every blob was either written successfully or did not need to be
- * written; otherwise returns a non-zero error code.
- */
 static int
-write_blob_list(struct list_head *blob_list,
-		struct filedes *out_fd,
-		int write_resource_flags,
-		int out_ctype,
-		u32 out_chunk_size,
-		unsigned num_threads,
-		struct blob_table *blob_table,
-		struct list_head *blob_table_list,
-		u64 max_part_size,
-		struct filter_context *filter_ctx,
-		wimlib_progress_func_t progfunc,
-		void *progctx)
+finish_pending_blobs(struct write_blobs_ctx *ctx)
 {
 	int ret;
-	struct write_blobs_ctx ctx;
-	struct list_head raw_copy_blobs;
-	u64 num_nonraw_bytes;
-
-	wimlib_assert((write_resource_flags &
-		       (WRITE_RESOURCE_FLAG_SOLID |
-			WRITE_RESOURCE_FLAG_PIPABLE)) !=
-				(WRITE_RESOURCE_FLAG_SOLID |
-				 WRITE_RESOURCE_FLAG_PIPABLE));
-
-	validate_blob_list(blob_list);
-
-	if (list_empty(blob_list))
-		return 0;
-
-	/* If needed, set auxiliary information so that we can detect when the
-	 * library has finished using each external file.  */
-	if (unlikely(write_resource_flags & WRITE_RESOURCE_FLAG_SEND_DONE_WITH_FILE))
-		init_done_with_file_info(blob_list);
-
-	memset(&ctx, 0, sizeof(ctx));
-
-	ctx.out_fd = out_fd;
-	ctx.blob_table = blob_table;
-	ctx.blob_table_list = blob_table_list;
-	ctx.max_part_size = max_part_size;
-	ctx.out_ctype = out_ctype;
-	ctx.out_chunk_size = out_chunk_size;
-	ctx.write_resource_flags = write_resource_flags;
-	ctx.filter_ctx = filter_ctx;
-
-	/*
-	 * We normally sort the blobs to write by a "sequential" order that is
-	 * optimized for reading.  But when using solid compression, we instead
-	 * sort the blobs by file extension and file name (when applicable; and
-	 * we don't do this for blobs from solid resources) so that similar
-	 * files are grouped together, which improves the compression ratio.
-	 * This is somewhat of a hack since a blob does not necessarily
-	 * correspond one-to-one with a filename, nor is there any guarantee
-	 * that two files with similar names or extensions are actually similar
-	 * in content.  A potential TODO is to sort the blobs based on some
-	 * measure of similarity of their actual contents.
-	 */
-
-	ret = sort_blob_list_by_sequential_order(blob_list,
-						 offsetof(struct blob_descriptor,
-							  write_blobs_list));
+	
+	ret = finish_remaining_chunks(ctx);
 	if (ret)
 		return ret;
 
-	ret = compute_blob_list_stats(blob_list, &ctx);
-	if (ret)
-		return ret;
+	if (ctx->write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
+		struct wim_reshdr reshdr;
+		struct blob_descriptor *blob;
+		u64 offset_in_res;
 
-	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID_SORT) {
-		ret = sort_blob_list_for_solid_compression(blob_list);
-		if (unlikely(ret))
-			WARNING("Failed to sort blobs for solid compression. Continuing anyways.");
+		ret = end_write_resource(&ctx, &reshdr);
+		if (ret)
+			goto out_destroy_context;
+
+		offset_in_res = 0;
+		list_for_each_entry(blob, &ctx.blobs_in_solid_resource, write_blobs_list) {
+			blob->out_reshdr.size_in_wim = blob->size;
+			blob->out_reshdr.flags = reshdr_flags_for_blob(blob) |
+						 WIM_RESHDR_FLAG_SOLID;
+			blob->out_reshdr.uncompressed_size = 0;
+			blob->out_reshdr.offset_in_wim = offset_in_res;
+			blob->out_res_offset_in_wim = reshdr.offset_in_wim;
+			blob->out_res_size_in_wim = reshdr.size_in_wim;
+			blob->out_res_uncompressed_size = reshdr.uncompressed_size;
+			list_add_tail(&blob->blob_table_list, blob_table_list);
+			offset_in_res += blob->size;
+		}
+		INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
+		wimlib_assert(offset_in_res == reshdr.uncompressed_size);
 	}
 
-	ctx.progress_data.progfunc = progfunc;
-	ctx.progress_data.progctx = progctx;
+	return 0;
+}
 
-	num_nonraw_bytes = find_raw_copy_blobs(blob_list, write_resource_flags,
-					       out_ctype, out_chunk_size,
-					       &raw_copy_blobs);
+static void
+destroy_compressor(struct write_blobs_ctx *ctx)
+{
+	if (ctx.compressor) {
+		ctx.compressor->destroy(ctx.compressor);
+		ctx.compressor = NULL;
+	}
+}
 
-	/* Copy any compressed resources for which the raw data can be reused
-	 * without decompression.  */
-	ret = write_raw_copy_resources(&raw_copy_blobs, ctx.out_fd,
-				       blob_table_list, &ctx.progress_data);
+static int
+init_compressor(struct write_blobs_ctx *ctx, int out_ctype, u32 out_chunk_size,
+		unsigned num_threads)
+{
+	int ret;
 
-	if (ret || num_nonraw_bytes == 0)
-		goto out_destroy_context;
+	if (ctx->compressor &&
+	    ctx->compressor.out_ctype == out_ctype &&
+	    ctx->compressor.out_chunk_size == out_chunk_size)
+		return 0;
+
+	destroy_compressor(ctx);
 
 	/* Unless uncompressed output was required, allocate a chunk_compressor
 	 * to do compression.  There are serial and parallel implementations of
@@ -1615,43 +1465,20 @@ write_blob_list(struct list_head *blob_list,
 	#endif
 
 		if (ctx.compressor == NULL) {
-			ret = new_serial_chunk_compressor(out_ctype, out_chunk_size,
-							  &ctx.compressor);
-			if (ret)
-				goto out_destroy_context;
+			return new_serial_chunk_compressor(out_ctype, out_chunk_size,
+							   &ctx.compressor);
 		}
 	}
 
-	if (ctx.compressor)
-		ctx.progress_data.progress.write_streams.num_threads = ctx.compressor->num_threads;
-	else
-		ctx.progress_data.progress.write_streams.num_threads = 1;
+	return 0;
+}
 
-	INIT_LIST_HEAD(&ctx.blobs_being_compressed);
-	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
-
-	ret = call_progress(ctx.progress_data.progfunc,
-			    WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
-			    &ctx.progress_data.progress,
-			    ctx.progress_data.progctx);
-	if (ret)
-		goto out_destroy_context;
-
-	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
-		ret = begin_write_resource(&ctx, num_nonraw_bytes);
-		if (ret)
-			goto out_destroy_context;
-	}
-
-	/* Read the list of blobs needing to be compressed, using the specified
-	 * callbacks to execute processing of the data.  */
-
-	struct read_blob_callbacks cbs = {
-		.begin_blob	= write_blob_begin_read,
-		.consume_chunk	= write_blob_process_chunk,
-		.end_blob	= write_blob_end_read,
-		.ctx		= &ctx,
-	};
+static int
+read_blob_list_and_write(struct list_head *blob_list,
+			 const struct read_blob_callbacks *cbs,
+			 struct write_blobs_ctx *ctx)
+{
+	int ret;
 
 	ret = read_blob_list(blob_list,
 			     offsetof(struct blob_descriptor, write_blobs_list),
@@ -1660,139 +1487,168 @@ write_blob_list(struct list_head *blob_list,
 				VERIFY_BLOB_HASHES |
 				COMPUTE_MISSING_BLOB_HASHES);
 
+	if (!ret)
+		ret = finish_pending_blobs(&ctx);
+	return ret;
+}
+
+static int
+write_blobs(WIMStruct *wim,
+	    int image,
+	    struct list_head *metadata_blob_list,
+	    struct list_head *file_blob_list,
+	    int write_flags,
+	    unsigned num_threads,
+	    u64 max_part_size,
+	    struct filter_ctx *filter_ctx)
+{
+	int ret;
+	struct write_blobs_ctx ctx = {};
+	struct list_head raw_copy_blobs;
+	u64 num_nonraw_bytes;
+	const struct read_blob_callbacks cbs = {
+		.begin_blob	= write_blob_begin_read,
+		.consume_chunk	= write_blob_process_chunk,
+		.end_blob	= write_blob_end_read,
+		.ctx		= &ctx,
+	};
+	LIST_HEAD(tmp_list);
+
+	memset(&ctx, 0, sizeof(ctx));
+
+	ctx.wim = wim;
+	ctx.out_fd = wim->out_fd;
+	ctx.image = image;
+	ctx.blob_table = blob_table;
+	INIT_LIST_HEAD(&ctx.blob_table_list);
+	INIT_LIST_HEAD(&ctx.blobs_being_compressed);
+	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
+	ctx.max_part_size = max_part_size;
+	ctx.write_resource_flags = write_flags_to_resource_flags(write_flags);
+	ctx.filter_ctx = filter_ctx;
+	ctx.progress_data.progfunc = wim->progfunc;
+	ctx.progress_data.progctx = progctx;
+	ctx.progress_data.progress.write_streams.num_threads = ctx.compressor->num_threads;
+
+	/*
+	 * We normally sort the blobs to write by a "sequential" order that is
+	 * optimized for reading.  But when using solid compression, we instead
+	 * sort the blobs by file extension and file name (when applicable; and
+	 * we don't do this for blobs from solid resources) so that similar
+	 * files are grouped together, which improves the compression ratio.
+	 * This is somewhat of a hack since a blob does not necessarily
+	 * correspond one-to-one with a filename, nor is there any guarantee
+	 * that two files with similar names or extensions are actually similar
+	 * in content.  A potential TODO is to sort the blobs based on some
+	 * measure of similarity of their actual contents.
+	 */
+
+	ret = sort_blob_list_by_sequential_order(file_blob_list,
+						 offsetof(struct blob_descriptor,
+							  write_blobs_list));
+	if (ret)
+		return ret;
+
+	ret = tally_blob_list_stats(metadata_blob_list, &ctx);
+	if (ret)
+		return ret;
+
+	ret = tally_blob_list_stats(file_blob_list, &ctx);
+	if (ret)
+		return ret;
+
+	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID_SORT) {
+		ret = sort_blob_list_for_solid_compression(file_blob_list);
+		if (unlikely(ret))
+			WARNING("Failed to sort blobs for solid compression. Continuing anyways.");
+	}
+
+	/* If needed, set auxiliary information so that we can detect when the
+	 * library has finished using each external file.  */
+	if (unlikely(write_resource_flags & WRITE_RESOURCE_FLAG_SEND_DONE_WITH_FILE))
+		init_done_with_file_info(file_blob_list);
+
+	num_nonraw_bytes = find_raw_copy_blobs(file_blob_list, write_resource_flags,
+					       out_ctype, out_chunk_size,
+					       &raw_copy_blobs);
+
+	/* Copy any compressed resources for which the raw data can be reused
+	 * without decompression.  */
+	ret = write_raw_copy_resources(&raw_copy_blobs, ctx.out_fd,
+				       blob_table_list, &ctx.progress_data);
+
+	if (ret || num_nonraw_bytes == 0)
+		goto out_destroy_context;
+
+	ret = call_progress(wim->progfunc, WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
+			    &ctx.progress_data.progress, wim->progctx);
 	if (ret)
 		goto out_destroy_context;
 
-	ret = finish_remaining_chunks(&ctx);
-	if (ret)
-		goto out_destroy_context;
+	if (!list_empty(metadata_blob_list)) {
+		ret = init_compressor(ctx, wim->out_compression_type, wim->out_chunk_size);
+		if (ret)
+			goto out_destroy_context;
+		ret = read_blob_list_and_write(file_blob_list, &cbs, &ctx);
+		if (ret)
+			goto out_destroy_context;
+	}
 
-	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
-		struct wim_reshdr reshdr;
-		struct blob_descriptor *blob;
-		u64 offset_in_res;
+	if (!list_empty(file_blob_list)) {
 
-		ret = end_write_resource(&ctx, &reshdr);
+		int ctype;
+		u32 chunk_size;
+
+		if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
+			ctype = wim->out_compression_type;
+			chunk_size = wim->out_chunk_size;
+		} else {
+			ctype = wim->out_solid_compression_type;
+			chunk_size = wim->out_solid_chunk_size;
+		}
+
+		ret = init_compressor(ctx, ctype, chunk_size);
 		if (ret)
 			goto out_destroy_context;
 
-		offset_in_res = 0;
-		list_for_each_entry(blob, &ctx.blobs_in_solid_resource, write_blobs_list) {
-			blob->out_reshdr.size_in_wim = blob->size;
-			blob->out_reshdr.flags = reshdr_flags_for_blob(blob) |
-						 WIM_RESHDR_FLAG_SOLID;
-			blob->out_reshdr.uncompressed_size = 0;
-			blob->out_reshdr.offset_in_wim = offset_in_res;
-			blob->out_res_offset_in_wim = reshdr.offset_in_wim;
-			blob->out_res_size_in_wim = reshdr.size_in_wim;
-			blob->out_res_uncompressed_size = reshdr.uncompressed_size;
-			list_add_tail(&blob->blob_table_list, blob_table_list);
-			offset_in_res += blob->size;
+		if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
+			ret = begin_write_resource(&ctx, num_nonraw_bytes);
+			if (ret)
+				goto out_destroy_context;
 		}
-		wimlib_assert(offset_in_res == reshdr.uncompressed_size);
+
+		ret = read_blob_list_and_write(file_blob_list, &cbs, &ctx);
+		if (ret)
+			goto out_destroy_context;
 	}
 
 out_destroy_context:
 	FREE(ctx.chunk_csizes);
-	if (ctx.compressor)
-		ctx.compressor->destroy(ctx.compressor);
+	destroy_compressor(&ctx);
 	return ret;
-}
-
-
-static int
-write_file_data_blobs(WIMStruct *wim, struct list_head *blob_list,
-		      struct list_head *blob_table_list,
-		      int write_resource_flags, unsigned num_threads,
-		      u64 max_part_size, struct filter_context *filter_ctx)
-{
-	int out_ctype;
-	u32 out_chunk_size;
-
-	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
-		out_chunk_size = wim->out_solid_chunk_size;
-		out_ctype = wim->out_solid_compression_type;
-	} else {
-		out_chunk_size = wim->out_chunk_size;
-		out_ctype = wim->out_compression_type;
-	}
-
-	return write_blob_list(blob_list,
-			       &wim->out_fd,
-			       write_resource_flags,
-			       out_ctype,
-			       out_chunk_size,
-			       num_threads,
-			       wim->blob_table,
-			       blob_table_list,
-			       max_part_size,
-			       filter_ctx,
-			       wim->progfunc,
-			       wim->progctx);
-}
-
-/* Write the contents of the specified blob as a WIM resource.  */
-static int
-write_wim_resource(struct blob_descriptor *blob,
-		   struct filedes *out_fd,
-		   int out_ctype,
-		   u32 out_chunk_size,
-		   int write_resource_flags)
-{
-	LIST_HEAD(blob_list);
-	LIST_HEAD(blob_table_list);
-	list_add(&blob->write_blobs_list, &blob_list);
-	blob->will_be_in_output_wim = 1;
-	return write_blob_list(&blob_list,
-			       &blob_table_list,
-			       out_fd,
-			       write_resource_flags & ~WRITE_RESOURCE_FLAG_SOLID,
-			       out_ctype,
-			       out_chunk_size,
-			       1,
-			       NULL,
-			       NULL,
-			       NULL,
-			       NULL);
 }
 
 /* Write the contents of the specified buffer as a WIM resource.  */
 int
-write_wim_resource_from_buffer(const void *buf,
-			       size_t buf_size,
-			       bool is_metadata,
-			       struct filedes *out_fd,
-			       int out_ctype,
-			       u32 out_chunk_size,
-			       struct wim_reshdr *out_reshdr,
-			       u8 *hash_ret,
-			       int write_resource_flags)
+write_uncompressed_resource(const void *buf,
+			    size_t buf_size,
+			    bool is_metadata,
+			    struct filedes *out_fd,
+			    struct wim_reshdr *out_reshdr,
+			    int write_resource_flags)
 {
 	int ret;
-	struct blob_descriptor blob;
 
-	if (unlikely(buf_size == 0)) {
-		zero_reshdr(out_reshdr);
-		if (hash_ret)
-			copy_hash(hash_ret, zero_hash);
-		return 0;
-	}
+	out_reshdr->offset_in_wim = out_fd->offset;
+	out_reshdr->size_in_wim = buf_size;
+	out_reshdr->uncompressed_size = buf_size;
+	out_reshdr->flags = 0;
+	if (is_metadata)
+		out_reshdr->flags |= WIM_RESHDR_FLAG_METADATA;
 
-	blob_set_is_located_in_attached_buffer(&blob, (void *)buf, buf_size);
-	sha1_buffer(buf, buf_size, blob.hash);
-	blob.unhashed = 0;
-	blob.is_metadata = is_metadata;
+	write_pwm_blob_header
 
-	ret = write_wim_resource(&blob, out_fd, out_ctype, out_chunk_size,
-				 write_resource_flags);
-	if (ret)
-		return ret;
-
-	copy_reshdr(out_reshdr, &blob.out_reshdr);
-
-	if (hash_ret)
-		copy_hash(hash_ret, blob.hash);
-	return 0;
+	return full_write(out_fd, buf, buf_size);
 }
 
 struct blob_size_table {
@@ -2539,6 +2395,13 @@ should_default_to_solid_compression(WIMStruct *wim, int write_flags)
 		wim_has_solid_resources(wim);
 }
 
+struct split_context {
+	union wimlib_progress_info split_progress;
+	tchar *swm_name_buf;
+	tchar *swm_suffix;
+	size_t swm_base_name_len;
+};
+
 static int
 write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	  int write_flags, unsigned num_threads, u64 part_size)
@@ -2547,10 +2410,7 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	int write_resource_flags;
 	struct list_head blob_list;
 	struct filter_context filter_ctx;
-	union wimlib_progress_info split_progress;
-	tchar *swm_name_buf;
-	tchar *swm_suffix;
-	size_t swm_base_name_len;
+	struct split_context ctx;
 
 	/* A valid image (or all images) must be specified.  */
 	if (image != WIMLIB_ALL_IMAGES &&
@@ -2688,7 +2548,7 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 		wim->out_hdr.boot_idx = 1;
 	else
 		wim->out_hdr.boot_idx = 0;
-	
+
 	if (part_size) {
 		tchar *dot;
 		size_t swm_name_len;
