@@ -366,6 +366,9 @@ struct write_blobs_ctx {
 	 * written.  */
 	struct blob_table *blob_table;
 
+	/* The list of written blobs which is being collected  */
+	struct list_head *blob_table_list;
+
 	/* Compression format to use.  */
 	int out_ctype;
 
@@ -741,7 +744,6 @@ write_blob_begin_read(struct blob_descriptor *blob, void *_ctx)
 				ret = do_write_blobs_progress(&ctx->progress_data,
 							      blob->size, 1, true);
 				list_del(&blob->write_blobs_list);
-				list_del(&blob->blob_table_list);
 				if (new_blob->will_be_in_output_wim)
 					new_blob->out_refcnt += blob->out_refcnt;
 				if (ctx->write_resource_flags & WRITE_RESOURCE_FLAG_SOLID)
@@ -762,8 +764,6 @@ write_blob_begin_read(struct blob_descriptor *blob, void *_ctx)
 				 * data.  */
 				list_replace(&blob->write_blobs_list,
 					     &new_blob->write_blobs_list);
-				list_replace(&blob->blob_table_list,
-					     &new_blob->blob_table_list);
 				blob->will_be_in_output_wim = 0;
 				new_blob->out_refcnt = blob->out_refcnt;
 				new_blob->will_be_in_output_wim = 1;
@@ -995,6 +995,7 @@ write_chunk(struct write_blobs_ctx *ctx, const void *cchunk,
 			if (ret)
 				return ret;
 			list_del(&blob->write_blobs_list);
+			list_add(&blob->blob_table_list, ctx->blob_table_list);
 			completed_blob_count++;
 		}
 	}
@@ -1226,7 +1227,8 @@ find_raw_copy_blobs(struct list_head *blob_list, int write_resource_flags,
  * being written.  */
 static int
 write_raw_copy_resource(struct wim_resource_descriptor *in_rdesc,
-			struct filedes *out_fd)
+			struct filedes *out_fd,
+			struct list_head *blob_table_list)
 {
 	u64 cur_read_offset;
 	u64 end_read_offset;
@@ -1290,7 +1292,7 @@ write_raw_copy_resource(struct wim_resource_descriptor *in_rdesc,
 				blob->out_res_offset_in_wim = out_offset_in_wim;
 			else
 				blob->out_reshdr.offset_in_wim = out_offset_in_wim;
-
+			list_add_tail(&blob->blob_table_list, blob_table_list);
 		}
 	}
 	return 0;
@@ -1301,6 +1303,7 @@ write_raw_copy_resource(struct wim_resource_descriptor *in_rdesc,
 static int
 write_raw_copy_resources(struct list_head *raw_copy_blobs,
 			 struct filedes *out_fd,
+			 struct list_head *blob_table_list,
 			 struct write_blobs_progress_data *progress_data)
 {
 	struct blob_descriptor *blob;
@@ -1312,7 +1315,8 @@ write_raw_copy_resources(struct list_head *raw_copy_blobs,
 	list_for_each_entry(blob, raw_copy_blobs, write_blobs_list) {
 		if (blob->rdesc->raw_copy_ok) {
 			/* Write each solid resource only one time.  */
-			ret = write_raw_copy_resource(blob->rdesc, out_fd);
+			ret = write_raw_copy_resource(blob->rdesc, out_fd,
+						      blob_table_list);
 			if (ret)
 				return ret;
 			blob->rdesc->raw_copy_ok = 0;
@@ -1498,6 +1502,7 @@ init_done_with_file_info(struct list_head *blob_list)
  */
 static int
 write_blob_list(struct list_head *blob_list,
+		struct list_head *blob_table_list,
 		struct filedes *out_fd,
 		int write_resource_flags,
 		int out_ctype,
@@ -1577,7 +1582,7 @@ write_blob_list(struct list_head *blob_list,
 	/* Copy any compressed resources for which the raw data can be reused
 	 * without decompression.  */
 	ret = write_raw_copy_resources(&raw_copy_blobs, ctx.out_fd,
-				       &ctx.progress_data);
+				       blob_table_list, &ctx.progress_data);
 
 	if (ret || num_nonraw_bytes == 0)
 		goto out_destroy_context;
@@ -1675,6 +1680,7 @@ write_blob_list(struct list_head *blob_list,
 			blob->out_res_offset_in_wim = reshdr.offset_in_wim;
 			blob->out_res_size_in_wim = reshdr.size_in_wim;
 			blob->out_res_uncompressed_size = reshdr.uncompressed_size;
+			list_add_tail(&blob->blob_table_list, blob_table_list);
 			offset_in_res += blob->size;
 		}
 		wimlib_assert(offset_in_res == reshdr.uncompressed_size);
@@ -1689,17 +1695,13 @@ out_destroy_context:
 
 
 static int
-write_file_data_blobs(WIMStruct *wim,
-		      struct list_head *blob_list,
-		      int write_flags,
-		      unsigned num_threads,
+write_file_data_blobs(WIMStruct *wim, struct list_head *blob_list,
+		      struct list_head *blob_table_list,
+		      int write_resource_flags, unsigned num_threads,
 		      struct filter_context *filter_ctx)
 {
 	int out_ctype;
 	u32 out_chunk_size;
-	int write_resource_flags;
-
-	write_resource_flags = write_flags_to_resource_flags(write_flags);
 
 	if (write_resource_flags & WRITE_RESOURCE_FLAG_SOLID) {
 		out_chunk_size = wim->out_solid_chunk_size;
@@ -1710,6 +1712,7 @@ write_file_data_blobs(WIMStruct *wim,
 	}
 
 	return write_blob_list(blob_list,
+			       blob_table_list,
 			       &wim->out_fd,
 			       write_resource_flags,
 			       out_ctype,
@@ -1730,9 +1733,11 @@ write_wim_resource(struct blob_descriptor *blob,
 		   int write_resource_flags)
 {
 	LIST_HEAD(blob_list);
+	LIST_HEAD(blob_table_list);
 	list_add(&blob->write_blobs_list, &blob_list);
 	blob->will_be_in_output_wim = 1;
 	return write_blob_list(&blob_list,
+			       &blob_table_list,
 			       out_fd,
 			       write_resource_flags & ~WRITE_RESOURCE_FLAG_SOLID,
 			       out_ctype,
@@ -2056,21 +2061,6 @@ filter_blob_list_for_write(struct list_head *blob_list,
  *	does not take into account that they may become duplicates when actually
  *	hashed.
  *
- * @blob_table_list_ret
- *	List of blobs, linked by blob_table_list, that need to be included in
- *	the WIM's blob table will be returned here.  This will be a superset of
- *	the blobs in @blob_list_ret.
- *
- *	This list will be a proper superset of @blob_list_ret if and only if
- *	WIMLIB_WRITE_FLAG_APPEND was specified in @write_flags and some of the
- *	blobs that would otherwise need to be written were already located in
- *	the WIM file.
- *
- *	All blobs in this list will have @out_refcnt set to the number of
- *	references to the blob in the output WIM.  If
- *	WIMLIB_WRITE_FLAG_STREAMS_OK was specified in @write_flags, @out_refcnt
- *	may be as low as 0.
- *
  * @filter_ctx_ret
  *	A context for queries of blob filter status with blob_filtered() is
  *	returned in this location.
@@ -2088,14 +2078,11 @@ filter_blob_list_for_write(struct list_head *blob_list,
  * otherwise.
  */
 static int
-prepare_blob_list_for_write(WIMStruct *wim, int image,
-			    int write_flags,
+prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
 			    struct list_head *blob_list_ret,
-			    struct list_head *blob_table_list_ret,
 			    struct filter_context *filter_ctx_ret)
 {
 	int ret;
-	struct blob_descriptor *blob;
 
 	filter_ctx_ret->write_flags = write_flags;
 	filter_ctx_ret->wim = wim;
@@ -2107,10 +2094,6 @@ prepare_blob_list_for_write(WIMStruct *wim, int image,
 				blob_list_ret);
 	if (ret)
 		return ret;
-
-	INIT_LIST_HEAD(blob_table_list_ret);
-	list_for_each_entry(blob, blob_list_ret, write_blobs_list)
-		list_add_tail(&blob->blob_table_list, blob_table_list_ret);
 
 	ret = determine_blob_size_uniquity(blob_list_ret, wim->blob_table,
 					   filter_ctx_ret);
@@ -2124,53 +2107,8 @@ prepare_blob_list_for_write(WIMStruct *wim, int image,
 }
 
 static int
-write_file_data(WIMStruct *wim, int image, int write_flags,
-		unsigned num_threads,
-		struct list_head *blob_list_override,
-		struct list_head *blob_table_list_ret)
-{
-	int ret;
-	struct list_head _blob_list;
-	struct list_head *blob_list;
-	struct blob_descriptor *blob;
-	struct filter_context _filter_ctx;
-	struct filter_context *filter_ctx;
-
-	if (blob_list_override == NULL) {
-		/* Normal case: prepare blob list from image(s) being written.
-		 */
-		blob_list = &_blob_list;
-		filter_ctx = &_filter_ctx;
-		ret = prepare_blob_list_for_write(wim, image, write_flags,
-						  blob_list,
-						  blob_table_list_ret,
-						  filter_ctx);
-		if (ret)
-			return ret;
-	} else {
-		/* Currently only as a result of wimlib_split() being called:
-		 * use blob list already explicitly provided.  Use existing
-		 * reference counts.  */
-		blob_list = blob_list_override;
-		filter_ctx = NULL;
-		INIT_LIST_HEAD(blob_table_list_ret);
-		list_for_each_entry(blob, blob_list, write_blobs_list) {
-			blob->out_refcnt = blob->refcnt;
-			blob->will_be_in_output_wim = 1;
-			blob->unique_size = 0;
-			list_add_tail(&blob->blob_table_list, blob_table_list_ret);
-		}
-	}
-
-	return write_file_data_blobs(wim,
-				     blob_list,
-				     write_flags,
-				     num_threads,
-				     filter_ctx);
-}
-
-static int
-write_metadata_resources(WIMStruct *wim, int image, int write_flags)
+write_metadata_resources(WIMStruct *wim, int image, int write_flags,
+			 struct list_head *blob_table_list)
 {
 	int ret;
 	int start_image;
@@ -2178,8 +2116,6 @@ write_metadata_resources(WIMStruct *wim, int image, int write_flags)
 	int write_resource_flags;
 
 	write_resource_flags = write_flags_to_resource_flags(write_flags);
-
-	write_resource_flags &= ~WRITE_RESOURCE_FLAG_SOLID;
 
 	ret = call_progress(wim->progfunc,
 			    WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN,
@@ -2229,6 +2165,9 @@ write_metadata_resources(WIMStruct *wim, int image, int write_flags)
 		}
 		if (ret)
 			return ret;
+		list_add_tail(&imd->metadata_blob->blob_table_list,
+			      blob_table_list);
+		imd->metadata_blob->out_refcnt = 1;
 	}
 
 	return call_progress(wim->progfunc,
@@ -2286,23 +2225,29 @@ cmp_blobs_by_out_rdesc(const void *p1, const void *p2)
 }
 
 static int
-write_blob_table(WIMStruct *wim, int image, int write_flags,
+blob_add_if_in_same_wim(struct blob_descriptor *blob, void *_wim)
+{
+	WIMStruct *wim = _wim;
+	struct list_head *blob_table_list = wim->private;
+
+	if (blob->blob_location == BLOB_IN_WIM && blob->rdesc->wim == wim) {
+		list_add(&blob->blob_table_list, blob_table_list);
+		blob_set_out_reshdr_for_reuse(blob);
+	}
+	return 0;
+}
+
+static int
+write_blob_table(WIMStruct *wim, int write_flags,
 		 struct list_head *blob_table_list)
 {
 	int ret;
-	int start_image;
-	int end_image;
 
-	/* Set output resource metadata for blobs already present in WIM.  */
+	/* If doing an append, add and prepare blob descriptors for existing
+	 * blobs in the WIM file.  */
 	if (write_flags & WIMLIB_WRITE_FLAG_APPEND) {
-		struct blob_descriptor *blob;
-		list_for_each_entry(blob, blob_table_list, blob_table_list) {
-			if (blob->blob_location == BLOB_IN_WIM &&
-			    blob->rdesc->wim == wim)
-			{
-				blob_set_out_reshdr_for_reuse(blob);
-			}
-		}
+		wim->private = blob_table_list;
+		for_blob_in_table(wim->blob_table, blob_add_if_in_same_wim, wim);
 	}
 
 	ret = sort_blob_list(blob_table_list,
@@ -2310,27 +2255,6 @@ write_blob_table(WIMStruct *wim, int image, int write_flags,
 			     cmp_blobs_by_out_rdesc);
 	if (ret)
 		return ret;
-
-	/* Add entries for metadata resources.  */
-	if (image == WIMLIB_ALL_IMAGES) {
-		start_image = 1;
-		end_image = wim->hdr.image_count;
-	} else {
-		start_image = image;
-		end_image = image;
-	}
-
-	/* Push metadata blob table entries onto the front of the list
-	 * in reverse order, so that they're written in order.
-	 */
-	for (int i = end_image; i >= start_image; i--) {
-		struct blob_descriptor *metadata_blob;
-
-		metadata_blob = wim->image_metadata[i - 1]->metadata_blob;
-		wimlib_assert(metadata_blob->out_reshdr.flags & WIM_RESHDR_FLAG_METADATA);
-		metadata_blob->out_refcnt = 1;
-		list_add(&metadata_blob->blob_table_list, blob_table_list);
-	}
 
 	return write_blob_table_from_blob_list(blob_table_list,
 					       &wim->out_fd,
@@ -2394,8 +2318,7 @@ finish_write(WIMStruct *wim, int image, int write_flags,
 
 	/* Write blob table if needed.  */
 	if (!(write_flags & WIMLIB_WRITE_FLAG_NO_NEW_BLOBS)) {
-		ret = write_blob_table(wim, image, write_flags,
-				       blob_table_list);
+		ret = write_blob_table(wim, write_flags, blob_table_list);
 		if (ret) {
 			free_integrity_table(old_integrity_table);
 			return ret;
@@ -2597,55 +2520,6 @@ unlock_wim_for_append(WIMStruct *wim)
  * WIMLIB_WRITE_FLAG_PIPABLE) and as stated above they use different magic
  * characters to identify the file.
  */
-static int
-write_pipable_wim(WIMStruct *wim, int image, int write_flags,
-		  unsigned num_threads,
-		  struct list_head *blob_list_override,
-		  struct list_head *blob_table_list_ret)
-{
-	int ret;
-	struct wim_reshdr xml_reshdr;
-
-	WARNING("Creating a pipable WIM, which will "
-		"be incompatible\n"
-		"          with Microsoft's software (WIMGAPI/ImageX/DISM).");
-
-	/* At this point, the header at the beginning of the file has already
-	 * been written.  */
-
-	/* For efficiency, when wimlib adds an image to the WIM with
-	 * wimlib_add_image(), the SHA-1 message digests of files are not
-	 * calculated; instead, they are calculated while the files are being
-	 * written.  However, this does not work when writing a pipable WIM,
-	 * since when writing a blob to a pipable WIM, its SHA-1 message digest
-	 * needs to be known before the blob data is written.  Therefore, before
-	 * getting much farther, we need to pre-calculate the SHA-1 message
-	 * digests of all blobs that will be written.  */
-	ret = wim_checksum_unhashed_blobs(wim);
-	if (ret)
-		return ret;
-
-	/* Write extra copy of the XML data.  */
-	ret = write_wim_xml_data(wim, image, WIM_TOTALBYTES_OMIT,
-				 &xml_reshdr, WRITE_RESOURCE_FLAG_PIPABLE);
-	if (ret)
-		return ret;
-
-	/* Write metadata resources for the image(s) being included in the
-	 * output WIM.  */
-	ret = write_metadata_resources(wim, image, write_flags);
-	if (ret)
-		return ret;
-
-	/* Write file data needed for the image(s) being included in the output
-	 * WIM, or file data needed for the split WIM part.  */
-	return write_file_data(wim, image, write_flags,
-			       num_threads, blob_list_override,
-			       blob_table_list_ret);
-
-	/* The blob table, XML data, and header at end are handled by
-	 * finish_write().  */
-}
 
 static bool
 should_default_to_solid_compression(WIMStruct *wim, int write_flags)
@@ -2661,7 +2535,13 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	  int write_flags, unsigned num_threads, u64 part_size)
 {
 	int ret;
-	struct list_head blob_table_list;
+	int write_resource_flags;
+	struct list_head blob_list;
+	struct filter_context filter_ctx;
+	union wimlib_progress_info split_progress;
+	tchar *swm_name_buf;
+	tchar *swm_suffix;
+	size_t swm_base_name_len;
 
 	/* A valid image (or all images) must be specified.  */
 	if (image != WIMLIB_ALL_IMAGES &&
@@ -2687,8 +2567,7 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	/* A split WIM can't be written to a file descriptor.  */
-	if ((write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) &&
-	    (part_size != 0))
+	if (part_size != 0 && (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR))
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	/* Only wimlib_overwrite() accepts UNSAFE_COMPACT.  */
@@ -2724,10 +2603,28 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	memset(&wim->out_hdr, 0, sizeof(wim->out_hdr));
 
 	/* Set the magic number.  */
-	if (write_flags & WIMLIB_WRITE_FLAG_PIPABLE)
+	if (write_flags & WIMLIB_WRITE_FLAG_PIPABLE) {
+		WARNING("Creating a pipable WIM, which will "
+			"be incompatible\n"
+			"          with Microsoft's software (WIMGAPI/ImageX/DISM).");
+
+		/* For efficiency, when wimlib adds an image to the WIM with
+		 * wimlib_add_image(), the SHA-1 message digests of files are
+		 * not calculated; instead, they are calculated while the files
+		 * are being written.  However, this does not work when writing
+		 * a pipable WIM, since when writing a blob to a pipable WIM,
+		 * its SHA-1 message digest needs to be known before the blob
+		 * data is written.  Therefore, before getting much farther, we
+		 * need to pre-calculate the SHA-1 message digests of all blobs
+		 * that will be written.  */
+		ret = wim_checksum_unhashed_blobs(wim);
+		if (ret)
+			return ret;
+
 		wim->out_hdr.magic = PWM_MAGIC;
-	else
+	} else {
 		wim->out_hdr.magic = WIM_MAGIC;
+	}
 
 	/* Set the version number.  */
 	if ((write_flags & WIMLIB_WRITE_FLAG_SOLID) ||
@@ -2782,78 +2679,149 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 		wim->out_hdr.boot_idx = 1;
 	else
 		wim->out_hdr.boot_idx = 0;
+	
+	if (part_size) {
+		tchar *dot;
+		size_t swm_name_len;
 
-	/* SPLIT BEGIN  */
-
-	if (part_size)
-		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
-	/*wim->out_hdr.part_number = part_number;*/
-	/*wim->out_hdr.total_parts = total_parts;*/
-
-	/* Set up the output file descriptor.  */
-	if (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) {
-		/* File descriptor was explicitly provided.  */
-		int fd = *(const int *)path_or_fd;
-
-		if (fd < 0)
-			return WIMLIB_ERR_INVALID_PARAM;
-		filedes_init(&wim->out_fd, fd);
-		if (!filedes_is_seekable(&wim->out_fd)) {
-			/* The file descriptor is a pipe.  */
-			ret = WIMLIB_ERR_INVALID_PARAM;
-			if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
-				goto out_cleanup;
-			if (write_flags & WIMLIB_WRITE_FLAG_CHECK_INTEGRITY) {
-				ERROR("Can't include integrity check when "
-				      "writing pipable WIM to pipe!");
-				goto out_cleanup;
-			}
+		memset(&split_progress, 0, sizeof(split_progress));
+		split_progress.split.cur_part_number = 1;
+		split_progress.split.total_bytes = 0; // TODO
+		split_progress.split.completed_bytes = 0; // TODO
+		split_progress.split.total_parts = 0; // TODO
+		swm_name_len = tstrlen((const tchar *)path_or_fd);
+		swm_name_buf = alloca((swm_name_len + 20) * sizeof(tchar));
+		tstrcpy(swm_name_buf, (const tchar *)path_or_fd);
+		dot = tstrchr(swm_name_buf, T('.'));
+		if (dot) {
+			swm_base_name_len = dot - swm_name_buf;
+			swm_suffix = alloca((tstrlen(dot) + 1) * sizeof(tchar));
+			tstrcpy(swm_suffix, dot);
+		} else {
+			swm_base_name_len = swm_name_len;
+			swm_suffix = alloca(1 * sizeof(tchar));
+			swm_suffix[0] = T('\0');
 		}
+
+		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
 	} else {
-		/* Filename of WIM to write was provided; open file descriptor
-		 * to it.  */
-		const tchar *path = path_or_fd;
-		if (!path || !*path)
-			return WIMLIB_ERR_INVALID_PARAM;
-		ret = open_wim_writable(wim, path, O_TRUNC | O_CREAT | O_RDWR);
-		if (ret)
-			goto out_cleanup;
+		wim->out_hdr.part_number = 1;
+		wim->out_hdr.total_parts = 1;
 	}
 
-	/* Write initial header.  This is merely a "dummy" header since it
-	 * doesn't have resource entries filled in yet, so it will be
-	 * overwritten later (unless writing a pipable WIM).  */
-	if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
-		wim->out_hdr.flags |= WIM_HDR_FLAG_WRITE_IN_PROGRESS;
-	ret = write_wim_header(&wim->out_hdr, &wim->out_fd, wim->out_fd.offset);
-	wim->out_hdr.flags &= ~WIM_HDR_FLAG_WRITE_IN_PROGRESS;
+	ret = prepare_blob_list_for_write(wim, image, write_flags,
+					  &blob_list, &filter_ctx);
 	if (ret)
-		goto out_cleanup;
+		return ret;
 
-	/* Write file data and metadata resources.  */
-	if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE)) {
-		/* Default case: create a normal (non-pipable) WIM.  */
-		ret = write_file_data(wim, image, write_flags,
-				      num_threads,
-				      NULL,
-				      &blob_table_list);
+	write_resource_flags = write_flags_to_resource_flags(write_flags);
+
+	for (;;) {
+		/* Writing a new WIM part  */
+
+		LIST_HEAD(blob_table_list);
+
+		if (part_size) {
+			u16 part_number = split_progress.split.cur_part_number;
+
+			if (part_number != 1) {
+				tsprintf(swm_name_buf + swm_base_name_len,
+					 T("%u%"TS), part_number, swm_suffix);
+			}
+			split_progress.split.part_name = swm_name_buf;
+
+			ret = call_progress(wim->progfunc,
+					    WIMLIB_PROGRESS_MSG_SPLIT_BEGIN_PART,
+					    &split_progress,
+					    wim->progctx);
+			if (ret)
+				goto out_cleanup;
+
+			wim->out_hdr.part_number = part_number;
+			path_or_fd = swm_name_buf;
+		}
+
+		/* Set up the output file descriptor.  */
+		if (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) {
+			/* File descriptor was explicitly provided.  */
+			int fd = *(const int *)path_or_fd;
+
+			if (fd < 0)
+				return WIMLIB_ERR_INVALID_PARAM;
+			filedes_init(&wim->out_fd, fd);
+			if (!filedes_is_seekable(&wim->out_fd)) {
+				/* The file descriptor is a pipe.  */
+				ret = WIMLIB_ERR_INVALID_PARAM;
+				if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
+					goto out_cleanup;
+				if (write_flags & WIMLIB_WRITE_FLAG_CHECK_INTEGRITY) {
+					ERROR("Can't include integrity check when "
+					      "writing pipable WIM to pipe!");
+					goto out_cleanup;
+				}
+			}
+		} else {
+			/* Writing to an on-disk file  */
+			const tchar *path = path_or_fd;
+			if (!path || !*path)
+				return WIMLIB_ERR_INVALID_PARAM;
+			ret = open_wim_writable(wim, path,
+						O_TRUNC | O_CREAT | O_RDWR);
+			if (ret)
+				goto out_cleanup;
+		}
+
+		/* Write the initial header.  This is merely a "dummy" header
+		 * since it doesn't have resource entries filled in yet, so it
+		 * will be overwritten later (unless writing a pipable WIM).  */
+		if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
+			wim->out_hdr.flags |= WIM_HDR_FLAG_WRITE_IN_PROGRESS;
+		ret = write_wim_header(&wim->out_hdr, &wim->out_fd, wim->out_fd.offset);
+		wim->out_hdr.flags &= ~WIM_HDR_FLAG_WRITE_IN_PROGRESS;
 		if (ret)
 			goto out_cleanup;
 
-		ret = write_metadata_resources(wim, image, write_flags);
+		/* If it's a pipable WIM, write the initial XML data.  */
+		if (write_flags & WIMLIB_WRITE_FLAG_PIPABLE) {
+			struct wim_reshdr xml_reshdr;
+
+			ret = write_wim_xml_data(wim, image, WIM_TOTALBYTES_OMIT,
+						 &xml_reshdr, write_resource_flags);
+			if (ret)
+				goto out_cleanup;
+		}
+
+		/* Write the metadata resources, unless writing the non-first
+		 * part of a split WIM.  */
+		if (!part_size || split_progress.split.cur_part_number == 1) {
+			ret = write_metadata_resources(wim, image, write_flags,
+						       &blob_table_list);
+		}
+
+		/* Write the file resources.  */
+		ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
+					    write_resource_flags, num_threads,
+					    &filter_ctx);
 		if (ret)
 			goto out_cleanup;
-	} else {
-		/* Non-default case: create pipable WIM.  */
-		ret = write_pipable_wim(wim, image, write_flags, num_threads,
-					NULL,
-					&blob_table_list);
+
+		/* Write blob table, XML data, and (optional) integrity table.  */
+		ret = finish_write(wim, image, write_flags, &blob_table_list);
 		if (ret)
 			goto out_cleanup;
+
+		if (part_size) {
+			// progress.split.completed_bytes += swm_info->parts[part_number - 1].size;
+
+			ret = call_progress(wim->progfunc,
+					    WIMLIB_PROGRESS_MSG_SPLIT_END_PART,
+					    &split_progress,
+					    wim->progctx);
+			if (ret)
+				return ret;
+			split_progress.split.cur_part_number++;
+		}
 	}
-
-	/* Write blob table, XML data, and (optional) integrity table.  */
-	ret = finish_write(wim, image, write_flags, &blob_table_list);
 
 out_cleanup:
 	(void)close_wim_writable(wim, write_flags);
@@ -3021,7 +2989,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 	int ret;
 	off_t old_wim_end;
 	struct list_head blob_list;
-	struct list_head blob_table_list;
+	LIST_HEAD(blob_table_list);
 	struct filter_context filter_ctx;
 
 	/* Include an integrity table by default if no preference was given and
@@ -3058,7 +3026,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 
 		ret = prepare_blob_list_for_write(wim, WIMLIB_ALL_IMAGES,
 						  write_flags, &blob_list,
-						  &blob_table_list, &filter_ctx);
+						  &filter_ctx);
 		if (ret)
 			goto out;
 
@@ -3131,7 +3099,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 
 		ret = prepare_blob_list_for_write(wim, WIMLIB_ALL_IMAGES,
 						  write_flags, &blob_list,
-						  &blob_table_list, &filter_ctx);
+						  &filter_ctx);
 		if (ret)
 			goto out;
 
@@ -3162,12 +3130,15 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		goto out_restore_hdr;
 	}
 
-	ret = write_file_data_blobs(wim, &blob_list, write_flags,
+	ret = write_file_data_blobs(wim, &blob_list,
+				    &blob_table_list,
+				    write_flags_to_resource_flags(write_flags),
 				    num_threads, &filter_ctx);
 	if (ret)
 		goto out_truncate;
 
-	ret = write_metadata_resources(wim, WIMLIB_ALL_IMAGES, write_flags);
+	ret = write_metadata_resources(wim, WIMLIB_ALL_IMAGES, write_flags,
+				       &blob_table_list);
 	if (ret)
 		goto out_truncate;
 
