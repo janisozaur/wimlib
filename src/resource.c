@@ -36,6 +36,7 @@
 #include "wimlib/endianness.h"
 #include "wimlib/error.h"
 #include "wimlib/file_io.h"
+#include "wimlib/metadata.h"
 #include "wimlib/ntfs_3g.h"
 #include "wimlib/resource.h"
 #include "wimlib/sha1.h"
@@ -723,6 +724,7 @@ read_blob_prefix(const struct blob_descriptor *blob, u64 size,
 		[BLOB_IN_WIM] = read_wim_blob_prefix,
 		[BLOB_IN_FILE_ON_DISK] = read_file_on_disk_prefix,
 		[BLOB_IN_ATTACHED_BUFFER] = read_buffer_prefix,
+		[BLOB_IS_GENERATED_METADATA] = read_metadata_prefix,
 	#ifdef WITH_FUSE
 		[BLOB_IN_STAGING_FILE] = read_staging_file_prefix,
 	#endif

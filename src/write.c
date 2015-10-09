@@ -1825,6 +1825,9 @@ blob_size_table_insert(struct blob_descriptor *blob, void *_tab)
 	size_t pos;
 	struct blob_descriptor *same_size_blob;
 
+	if (blob->is_metadata)
+		return 0;
+
 	pos = hash_u64(blob->size) % tab->capacity;
 	blob->unique_size = 1;
 	hlist_for_each_entry(same_size_blob, &tab->array[pos], hash_list_2) {
@@ -1930,6 +1933,9 @@ prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
 					       struct list_head *blob_list_ret)
 {
 	int ret;
+	int i;
+	struct wim_image_metadata *imd;
+	struct blob_descriptor *blob;
 
 	INIT_LIST_HEAD(blob_list_ret);
 
@@ -1938,14 +1944,9 @@ prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
 	{
 		/* Fast case:  Assume that all blobs are being written and that
 		 * the reference counts are correct.  */
-		struct blob_descriptor *blob;
-		struct wim_image_metadata *imd;
-		unsigned i;
-
 		for_blob_in_table(wim->blob_table,
 				  fully_reference_blob_for_write,
 				  blob_list_ret);
-
 		for (i = 0; i < wim->hdr.image_count; i++) {
 			imd = wim->image_metadata[i];
 			image_for_each_unhashed_blob(blob, imd)
@@ -1960,6 +1961,17 @@ prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
 		ret = for_image(wim, image, image_find_blobs_to_reference);
 		if (ret)
 			return ret;
+	}
+
+	/* Reference metadata resources  */
+	for (i = (image == WIMLIB_ALL_IMAGES ? 1 : image);
+	     i <= (image == WIMLIB_ALL_IMAGES ? wim->hdr.image_count : image);
+	     i++)
+	{
+		imd = wim->image_metadata[i];
+		blob = imd->metadata_blob;
+		blob->will_be_in_output_wim = 0;
+		reference_blob_for_write(blob, blob_list_ret, 1);
 	}
 
 	return 0;
@@ -1983,7 +1995,7 @@ insert_other_if_hard_filtered(struct blob_descriptor *blob, void *_ctx)
 
 static int
 determine_blob_size_uniquity(struct list_head *blob_list,
-			     struct blob_table *lt,
+			     struct blob_table *table,
 			     struct filter_context *filter_ctx)
 {
 	int ret;
@@ -1999,7 +2011,7 @@ determine_blob_size_uniquity(struct list_head *blob_list,
 			.tab = &tab,
 			.filter_ctx = filter_ctx,
 		};
-		for_blob_in_table(lt, insert_other_if_hard_filtered, &ctx);
+		for_blob_in_table(table, insert_other_if_hard_filtered, &ctx);
 	}
 
 	list_for_each_entry(blob, blob_list, write_blobs_list)
@@ -2113,74 +2125,64 @@ prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
 	return 0;
 }
 
-static int
-write_metadata_resources(WIMStruct *wim, int image, int write_flags,
-			 struct list_head *blob_table_list)
-{
-	int ret;
-	int start_image;
-	int end_image;
-	int write_resource_flags;
+/*static int*/
+/*prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,*/
+			   /*struct list_head *blob_list)*/
+/*{*/
+	/*int ret;*/
+	/*int start_image;*/
+	/*int end_image;*/
+	/*int write_resource_flags;*/
 
-	write_resource_flags = write_flags_to_resource_flags(write_flags);
+	/*write_resource_flags = write_flags_to_resource_flags(write_flags);*/
 
-	ret = call_progress(wim->progfunc,
-			    WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN,
-			    NULL, wim->progctx);
-	if (ret)
-		return ret;
+	/*if (image == WIMLIB_ALL_IMAGES) {*/
+		/*start_image = 1;*/
+		/*end_image = wim->hdr.image_count;*/
+	/*} else {*/
+		/*start_image = image;*/
+		/*end_image = image;*/
+	/*}*/
 
-	if (image == WIMLIB_ALL_IMAGES) {
-		start_image = 1;
-		end_image = wim->hdr.image_count;
-	} else {
-		start_image = image;
-		end_image = image;
-	}
+	/*for (int i = start_image; i <= end_image; i++) {*/
+		/*struct wim_image_metadata *imd;*/
 
-	for (int i = start_image; i <= end_image; i++) {
-		struct wim_image_metadata *imd;
-
-		imd = wim->image_metadata[i - 1];
-		if (!is_image_metadata_in_any_wim(imd)) {
+		/*imd = wim->image_metadata[i - 1];*/
+		/*if (!is_image_metadata_in_any_wim(imd)) {*/
 			/* The image was modified from the original, or was
 			 * newly added, so we have to build and write a new
 			 * metadata resource.  */
-			ret = write_metadata_resource(wim, i,
-						      write_resource_flags);
-		} else if (is_image_metadata_in_wim(imd, wim) &&
-			   (write_flags & (WIMLIB_WRITE_FLAG_UNSAFE_COMPACT |
-					   WIMLIB_WRITE_FLAG_APPEND)))
-		{
+			/*ret = write_metadata_resource(wim, i,*/
+						      /*write_resource_flags);*/
+		/*} else if (is_image_metadata_in_wim(imd, wim) &&*/
+			   /*(write_flags & (WIMLIB_WRITE_FLAG_UNSAFE_COMPACT |*/
+					   /*WIMLIB_WRITE_FLAG_APPEND)))*/
+		/*{*/
 			/* The metadata resource is already in the WIM file.
 			 * For appends, we don't need to write it at all.  For
 			 * compactions, we re-write existing metadata resources
 			 * along with the existing file resources, not here.  */
-			if (write_flags & WIMLIB_WRITE_FLAG_APPEND)
-				blob_set_out_reshdr_for_reuse(imd->metadata_blob);
-			ret = 0;
-		} else {
+			/*if (write_flags & WIMLIB_WRITE_FLAG_APPEND)*/
+				/*blob_set_out_reshdr_for_reuse(imd->metadata_blob);*/
+			/*ret = 0;*/
+		/*} else {*/
 			/* The metadata resource is in a WIM file other than the
 			 * one being written to.  We need to rewrite it,
 			 * possibly compressed differently; but rebuilding the
 			 * metadata itself isn't necessary.  */
-			ret = write_wim_resource(imd->metadata_blob,
-						 &wim->out_fd,
-						 wim->out_compression_type,
-						 wim->out_chunk_size,
-						 write_resource_flags);
-		}
-		if (ret)
-			return ret;
-		list_add_tail(&imd->metadata_blob->blob_table_list,
-			      blob_table_list);
-		imd->metadata_blob->out_refcnt = 1;
-	}
+			/*ret = write_wim_resource(imd->metadata_blob,*/
+						 /*&wim->out_fd,*/
+						 /*wim->out_compression_type,*/
+						 /*wim->out_chunk_size,*/
+						 /*write_resource_flags);*/
+		/*}*/
+		/*if (ret)*/
+			/*return ret;*/
+		/*imd->metadata_blob->out_refcnt = 1;*/
+	/*}*/
 
-	return call_progress(wim->progfunc,
-			     WIMLIB_PROGRESS_MSG_WRITE_METADATA_END,
-			     NULL, wim->progctx);
-}
+	/*return 0;*/
+/*}*/
 
 static int
 open_wim_writable(WIMStruct *wim, const tchar *path, int open_flags)
@@ -2798,14 +2800,11 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 				goto out_cleanup;
 		}
 
-		/* Write the metadata resources, unless writing the non-first
-		 * part of a split WIM.  */
-		if (!part_size || split_progress.split.cur_part_number == 1) {
-			ret = write_metadata_resources(wim, image, write_flags,
-						       &blob_table_list);
-		}
-
-		/* Write the file resources.  */
+		/* Write blobs  */
+		ret = write_blob_list(&blob_list,
+				      &wim->out_fd,
+				      write_resource_flags,
+				      (write_resource_flags & WIMLIB_WRITE_RES
 		ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
 					    write_resource_flags, num_threads,
 					    part_size ? part_size : UINT64_MAX,

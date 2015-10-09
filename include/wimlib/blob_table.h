@@ -6,6 +6,8 @@
 #include "wimlib/sha1.h"
 #include "wimlib/types.h"
 
+struct wim_image_metadata;
+
 /* An enumerated type that identifies where a blob's data is located.  */
 enum blob_location {
 
@@ -25,6 +27,10 @@ enum blob_location {
 	/* The blob's data is available as the contents of the in-memory buffer
 	 * pointed to by @attached_buffer.  */
 	BLOB_IN_ATTACHED_BUFFER,
+
+	/* The blob is a serialized metadata resource which will be generated on
+	 * demand  */
+	BLOB_IS_GENERATED_METADATA,
 
 #ifdef WITH_FUSE
 	/* The blob's data is available as the contents of the file with name
@@ -187,6 +193,9 @@ struct blob_descriptor {
 
 				/* BLOB_IN_ATTACHED_BUFFER */
 				void *attached_buffer;
+
+				/* BLOB_IS_GENERATED_METADATA */
+				struct wim_image_metadata *imd;
 
 			#ifdef WITH_FUSE
 				/* BLOB_IN_STAGING_FILE  */

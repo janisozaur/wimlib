@@ -594,15 +594,6 @@ enum wimlib_progress_msg {
 	 */
 	WIMLIB_PROGRESS_MSG_WRITE_STREAMS = 12,
 
-	/** Per-image metadata is about to be written to the WIM file.  @p info
-	 * will not be valid. */
-	WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN = 13,
-
-	/** The per-image metadata has been written to the WIM file.  @p info
-	 * will not be valid.  This message is paired with a preceding
-	 * ::WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN message.  */
-	WIMLIB_PROGRESS_MSG_WRITE_METADATA_END = 14,
-
 	/** wimlib_overwrite() has successfully renamed the temporary file to
 	 * the original WIM file, thereby committing the changes to the WIM
 	 * file.  @p info will point to ::wimlib_progress_info.rename.  Note:
@@ -3660,9 +3651,7 @@ wimlib_open_wim_with_progress(const wimlib_tchar *wim_file,
  *	flag.
  *
  * If a progress function is registered with @p wim, then it will receive the
- * messages ::WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
- * ::WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN, and
- * ::WIMLIB_PROGRESS_MSG_WRITE_METADATA_END.
+ * message ::WIMLIB_PROGRESS_MSG_WRITE_STREAMS.
  */
 extern int
 wimlib_overwrite(WIMStruct *wim, int write_flags, unsigned num_threads);
@@ -4484,9 +4473,7 @@ wimlib_update_image(WIMStruct *wim,
  * indicate failure (for different reasons) to read the data from a WIM file.
  *
  * If a progress function is registered with @p wim, then it will receive the
- * messages ::WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
- * ::WIMLIB_PROGRESS_MSG_WRITE_METADATA_BEGIN, and
- * ::WIMLIB_PROGRESS_MSG_WRITE_METADATA_END.
+ * message ::WIMLIB_PROGRESS_MSG_WRITE_STREAMS.
  */
 extern int
 wimlib_write(WIMStruct *wim,

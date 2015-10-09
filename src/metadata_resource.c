@@ -30,7 +30,6 @@
 #include "wimlib/metadata.h"
 #include "wimlib/resource.h"
 #include "wimlib/security.h"
-#include "wimlib/write.h"
 
 /* Fix the security ID for every inode to be either -1 or in bounds.  */
 static void
@@ -147,24 +146,15 @@ recalculate_security_data_length(struct wim_security_data *sd)
 	sd->total_length = ALIGN(total_length, 8);
 }
 
-static int
-prepare_metadata_resource(WIMStruct *wim, int image,
-			  u8 **buf_ret, size_t *len_ret)
+int
+prepare_to_write_metadata_resource(struct wim_image_metadata *imd)
 {
-	u8 *buf;
-	u8 *p;
 	int ret;
 	u64 subdir_offset;
 	struct wim_dentry *root;
-	size_t len;
 	struct wim_security_data *sd;
-	struct wim_image_metadata *imd;
 
-	ret = select_wim_image(wim, image);
-	if (ret)
-		return ret;
-
-	imd = wim->image_metadata[image - 1];
+	blob_release_location(imd->metadata_blob);
 
 	root = imd->root_dentry;
 	sd = imd->security_data;
@@ -187,61 +177,44 @@ prepare_metadata_resource(WIMStruct *wim, int image,
 	/* Calculate the subdirectory offsets for the entire dentry tree.  */
 	calculate_subdir_offsets(root, &subdir_offset);
 
-	/* Total length of the metadata resource (uncompressed).  */
-	len = subdir_offset;
+	/* Update the metadata blob so that we can generate the metadata on
+	 * demand.  */
+	imd->metadata_blob->size = subdir_offset;
+	imd->metadata_blob->blob_location = BLOB_IS_GENERATED_METADATA;
+	imd->metadata_blob->imd = imd;
 
-	/* Allocate a buffer to contain the uncompressed metadata resource.  */
-	buf = NULL;
-	if (likely(len == subdir_offset))
-		buf = MALLOC(len);
-	if (!buf) {
-		ERROR("Failed to allocate %"PRIu64" bytes for "
-		      "metadata resource", subdir_offset);
-		return WIMLIB_ERR_NOMEM;
-	}
-
-	/* Write the security data into the resource buffer.  */
-	p = write_wim_security_data(sd, buf);
-
-	/* Write the dentry tree into the resource buffer.  */
-	p = write_dentry_tree(root, p);
-
-	/* We MUST have exactly filled the buffer; otherwise we calculated its
-	 * size incorrectly or wrote the data incorrectly.  */
-	wimlib_assert(p - buf == len);
-
-	*buf_ret = buf;
-	*len_ret = len;
 	return 0;
 }
 
 int
-write_metadata_resource(WIMStruct *wim, int image, int write_resource_flags)
+read_metadata_prefix(const struct blob_descriptor *blob, u64 size,
+		     const struct read_blob_callbacks *cbs)
 {
-	int ret;
+	struct wim_image_metadata *imd = blob->imd;
 	u8 *buf;
-	size_t len;
-	struct wim_image_metadata *imd;
+	u8 *p;
+	int ret;
 
-	ret = prepare_metadata_resource(wim, image, &buf, &len);
-	if (ret)
-		return ret;
+	buf = NULL;
+	if (likely((size_t)blob->size == blob->size))
+		buf = MALLOC(blob->size);
+	if (!buf) {
+		ERROR("Failed to allocate %"PRIu64" bytes for "
+		      "metadata resource", blob->size);
+		return WIMLIB_ERR_NOMEM;
+	}
 
-	imd = wim->image_metadata[image - 1];
+	/* Write the security data into the resource buffer.  */
+	p = write_wim_security_data(imd->security_data, buf);
 
-	/* Write the metadata resource to the output WIM using the proper
-	 * compression type, in the process updating the blob descriptor for the
-	 * metadata resource.  */
-	ret = write_wim_resource_from_buffer(buf,
-					     len,
-					     true,
-					     &wim->out_fd,
-					     wim->out_compression_type,
-					     wim->out_chunk_size,
-					     &imd->metadata_blob->out_reshdr,
-					     imd->metadata_blob->hash,
-					     write_resource_flags);
+	/* Write the dentry tree into the resource buffer.  */
+	p = write_dentry_tree(imd->root_dentry, p);
 
+	/* We MUST have exactly filled the buffer; otherwise we calculated its
+	 * size incorrectly or wrote the data incorrectly.  */
+	wimlib_assert(p - buf == blob->size);
+
+	ret = call_consume_chunk(buf, size, cbs);
 	FREE(buf);
 	return ret;
 }

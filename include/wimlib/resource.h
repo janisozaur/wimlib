@@ -283,7 +283,11 @@ extern int
 read_metadata_resource(struct wim_image_metadata *imd);
 
 extern int
-write_metadata_resource(WIMStruct *wim, int image, int write_resource_flags);
+prepare_to_write_metadata_resource(struct wim_image_metadata *imd);
+
+extern int
+read_metadata_prefix(const struct blob_descriptor *blob, u64 size,
+		     const struct read_blob_callbacks *cbs);
 
 /* Definitions specific to pipable WIM resources.  */
 
