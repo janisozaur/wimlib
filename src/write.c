@@ -369,6 +369,9 @@ struct write_blobs_ctx {
 	/* The list of written blobs which is being collected  */
 	struct list_head *blob_table_list;
 
+	/* The maximum part size in bytes (for writing split WIMs)  */
+	u64 max_part_size;
+
 	/* Compression format to use.  */
 	int out_ctype;
 
@@ -1502,13 +1505,14 @@ init_done_with_file_info(struct list_head *blob_list)
  */
 static int
 write_blob_list(struct list_head *blob_list,
-		struct list_head *blob_table_list,
 		struct filedes *out_fd,
 		int write_resource_flags,
 		int out_ctype,
 		u32 out_chunk_size,
 		unsigned num_threads,
 		struct blob_table *blob_table,
+		struct list_head *blob_table_list,
+		u64 max_part_size,
 		struct filter_context *filter_ctx,
 		wimlib_progress_func_t progfunc,
 		void *progctx)
@@ -1538,6 +1542,8 @@ write_blob_list(struct list_head *blob_list,
 
 	ctx.out_fd = out_fd;
 	ctx.blob_table = blob_table;
+	ctx.blob_table_list = blob_table_list;
+	ctx.max_part_size = max_part_size;
 	ctx.out_ctype = out_ctype;
 	ctx.out_chunk_size = out_chunk_size;
 	ctx.write_resource_flags = write_resource_flags;
@@ -1698,7 +1704,7 @@ static int
 write_file_data_blobs(WIMStruct *wim, struct list_head *blob_list,
 		      struct list_head *blob_table_list,
 		      int write_resource_flags, unsigned num_threads,
-		      struct filter_context *filter_ctx)
+		      u64 max_part_size, struct filter_context *filter_ctx)
 {
 	int out_ctype;
 	u32 out_chunk_size;
@@ -1712,13 +1718,14 @@ write_file_data_blobs(WIMStruct *wim, struct list_head *blob_list,
 	}
 
 	return write_blob_list(blob_list,
-			       blob_table_list,
 			       &wim->out_fd,
 			       write_resource_flags,
 			       out_ctype,
 			       out_chunk_size,
 			       num_threads,
 			       wim->blob_table,
+			       blob_table_list,
+			       max_part_size,
 			       filter_ctx,
 			       wim->progfunc,
 			       wim->progctx);
@@ -2801,6 +2808,7 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 		/* Write the file resources.  */
 		ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
 					    write_resource_flags, num_threads,
+					    part_size ? part_size : UINT64_MAX,
 					    &filter_ctx);
 		if (ret)
 			goto out_cleanup;
@@ -3130,10 +3138,9 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		goto out_restore_hdr;
 	}
 
-	ret = write_file_data_blobs(wim, &blob_list,
-				    &blob_table_list,
+	ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
 				    write_flags_to_resource_flags(write_flags),
-				    num_threads, &filter_ctx);
+				    num_threads, UINT64_MAX, &filter_ctx);
 	if (ret)
 		goto out_truncate;
 
