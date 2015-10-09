@@ -2179,20 +2179,28 @@ write_metadata_resources(WIMStruct *wim, int image, int write_flags)
 		struct wim_image_metadata *imd;
 
 		imd = wim->image_metadata[i - 1];
-		/* Build a new metadata resource only if image was modified from
-		 * the original (or was newly added).  Otherwise just copy the
-		 * existing one.  */
-		if (imd->modified) {
+		if (!is_image_metadata_in_any_wim(imd)) {
+			/* The image was modified from the original, or was
+			 * newly added, so we have to build and write a new
+			 * metadata resource.  */
 			ret = write_metadata_resource(wim, i,
 						      write_resource_flags);
-		} else if (write_flags & WIMLIB_WRITE_FLAG_UNSAFE_COMPACT) {
-			/* For compactions, existing metadata resources are
-			 * written along with the existing file resources.  */
-			ret = 0;
-		} else if (write_flags & WIMLIB_WRITE_FLAG_APPEND) {
-			blob_set_out_reshdr_for_reuse(imd->metadata_blob);
+		} else if (is_image_metadata_in_wim(imd, wim) &&
+			   (write_flags & (WIMLIB_WRITE_FLAG_UNSAFE_COMPACT |
+					   WIMLIB_WRITE_FLAG_APPEND)))
+		{
+			/* The metadata resource is already in the WIM file.
+			 * For appends, we don't need to write it at all.  For
+			 * compactions, we re-write existing metadata resources
+			 * along with the existing file resources, not here.  */
+			if (write_flags & WIMLIB_WRITE_FLAG_APPEND)
+				blob_set_out_reshdr_for_reuse(imd->metadata_blob);
 			ret = 0;
 		} else {
+			/* The metadata resource is in a WIM file other than the
+			 * one being written to.  We need to rewrite it,
+			 * possibly compressed differently; but rebuilding the
+			 * metadata itself isn't necessary.  */
 			ret = write_wim_resource(imd->metadata_blob,
 						 &wim->out_fd,
 						 wim->out_compression_type,
@@ -2880,11 +2888,12 @@ wimlib_write_to_fd(WIMStruct *wim, int fd,
 	return write_standalone_wim(wim, &fd, image, write_flags, num_threads);
 }
 
+/* Might we need to write blobs for at least one image?  */
 static bool
 any_images_modified(WIMStruct *wim)
 {
 	for (int i = 0; i < wim->hdr.image_count; i++)
-		if (wim->image_metadata[i]->modified)
+		if (!is_image_metadata_in_wim(wim->image_metadata[i], wim))
 			return true;
 	return false;
 }
@@ -3045,7 +3054,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 			 * with the file resources.  */
 			for (int i = 0; i < wim->hdr.image_count; i++) {
 				struct wim_image_metadata *imd = wim->image_metadata[i];
-				if (!imd->modified) {
+				if (is_image_metadata_in_wim(imd, wim)) {
 					fully_reference_blob_for_write(imd->metadata_blob,
 								       &blob_list);
 				}

@@ -329,7 +329,7 @@ select_wim_image(WIMStruct *wim, int image)
 	deselect_current_wim_image(wim);
 	wim->current_image = image;
 	imd = wim_get_current_image_metadata(wim);
-	if (imd->root_dentry || imd->modified) {
+	if (imd->root_dentry || !is_image_metadata_in_any_wim(imd)) {
 		ret = 0;
 	} else {
 		ret = read_metadata_resource(imd);
@@ -346,7 +346,7 @@ deselect_current_wim_image(WIMStruct *wim)
 	if (wim->current_image == WIMLIB_NO_IMAGE)
 		return;
 	imd = wim_get_current_image_metadata(wim);
-	if (!imd->modified) {
+	if (is_image_metadata_in_any_wim(imd) && imd->refcnt == 1) {
 		wimlib_assert(list_empty(&imd->unhashed_blobs));
 		destroy_image_metadata(imd, NULL, false);
 	}

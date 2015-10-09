@@ -220,7 +220,7 @@ wimlib_split(WIMStruct *wim, const tchar *swm_name,
 	}
 
 	for (i = 0; i < wim->hdr.image_count; i++) {
-		if (wim->image_metadata[i]->modified) {
+		if (!is_image_metadata_in_wim(wim->image_metadata[i], wim)) {
 			ERROR("Only an unmodified, on-disk WIM file can be split.");
 			return WIMLIB_ERR_UNSUPPORTED;
 		}
