@@ -67,8 +67,7 @@ wim_get_current_security_data(WIMStruct *wim)
 static inline bool
 is_image_metadata_in_any_wim(const struct wim_image_metadata *imd)
 {
-	/* The only possible values here are BLOB_NONEXISTENT and BLOB_IN_WIM */
-	return imd->metadata_blob->blob_location != BLOB_NONEXISTENT;
+	return imd->metadata_blob->blob_location == BLOB_IN_WIM;
 }
 
 /* Like is_image_metadata_in_any_wim(), but tests for a specific WIM file.  */

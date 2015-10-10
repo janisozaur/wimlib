@@ -323,17 +323,6 @@ prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
 			return ret;
 	}
 
-	/* Reference metadata resources  */
-	for (i = (image == WIMLIB_ALL_IMAGES ? 1 : image);
-	     i <= (image == WIMLIB_ALL_IMAGES ? wim->hdr.image_count : image);
-	     i++)
-	{
-		imd = wim->image_metadata[i];
-		blob = imd->metadata_blob;
-		blob->will_be_in_output_wim = 0;
-		reference_blob_for_write(blob, blob_list_ret, 1);
-	}
-
 	return 0;
 }
 
@@ -408,11 +397,13 @@ filter_blob_list_for_write(struct list_head *blob_list,
 
 static int
 prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,
-			   struct list_head *blob_list)
+			   struct list_head *metadata_list)
 {
 	int start_image;
 	int end_image;
 	int ret;
+
+	INIT_LIST_HEAD(metadata_list);
 
 	if (image == WIMLIB_ALL_IMAGES) {
 		start_image = 1;
@@ -434,7 +425,7 @@ prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,
 			if (ret)
 				return ret;
 		}
-		reference_metadata_for_write(imd, blob_list);
+		reference_metadata_for_write(imd, metadata_list);
 	}
 	return 0;
 }
@@ -492,6 +483,7 @@ prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,
 static int
 prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
 			    struct list_head *blob_list_ret,
+			    struct list_head *metadata_list_ret,
 			    struct filter_context *filter_ctx_ret)
 {
 	int ret;
@@ -1913,6 +1905,7 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	int ret;
 	struct write_ctx ctx;
 	struct list_head blob_list;
+	struct list_head metadata_list;
 	struct list_head raw_copy_blobs;
 	int out_ctype;
 	u32 out_chunk_size;
@@ -1936,10 +1929,9 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ctx.progress.write_streams.num_threads = num_threads;
 
 	ret = prepare_blob_list_for_write(wim, image, write_flags, &blob_list,
-					  &ctx.filter_ctx);
+					  &metadata_list, &ctx.filter_ctx);
 	if (ret)
 		return ret;
-
 
 	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
 		out_ctype = wim->out_solid_compression_type;
@@ -1948,8 +1940,6 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 		out_ctype = wim->out_compression_type;
 		out_chunk_size = wim->out_chunk_size;
 	}
-
-	/*prepare_blob_list_for_write(wim, image, write*/
 
 	/*
 	 * We normally sort the blobs to write by a "sequential" order that is
@@ -1971,6 +1961,9 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ret = tally_blob_list_stats(&blob_list, &ctx);
 	if (ret)
 		return ret;
+	ret = tally_blob_list_stats(&metadata_list, &ctx);
+	if (ret)
+		return ret;
 
 	if ((write_flags & (WIMLIB_WRITE_FLAG_SOLID |
 			    WIMLIB_WRITE_FLAG_NO_SOLID_SORT))
@@ -1986,6 +1979,8 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	 * library has finished using each external file.  */
 	if (unlikely(write_flags & WIMLIB_WRITE_FLAG_SEND_DONE_WITH_FILE_MESSAGES))
 		init_done_with_file_info(&blob_list);
+
+	list_splice(&metadata_list, &blob_list);
 
 	num_nonraw_bytes = find_raw_copy_blobs(&blob_list,
 					       write_flags,
