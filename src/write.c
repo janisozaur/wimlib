@@ -223,6 +223,14 @@ fully_reference_blob_for_write(struct blob_descriptor *blob, void *_blob_list)
 	return 0;
 }
 
+static void
+reference_metadata_for_write(struct wim_image_metadata *imd,
+			     struct list_head *blob_list)
+{
+	imd->metadata_blob->will_be_in_output_wim = 0;
+	reference_blob_for_write(imd->metadata_blob, blob_list, 1);
+}
+
 static int
 inode_find_blobs_to_reference(const struct wim_inode *inode,
 			      const struct blob_table *table,
@@ -398,6 +406,39 @@ filter_blob_list_for_write(struct list_head *blob_list,
 	}
 }
 
+static int
+prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,
+			   struct list_head *blob_list)
+{
+	int start_image;
+	int end_image;
+	int ret;
+
+	if (image == WIMLIB_ALL_IMAGES) {
+		start_image = 1;
+		end_image = wim->hdr.image_count;
+	} else {
+		start_image = image;
+		end_image = image;
+	}
+
+	for (int image = start_image; image <= end_image; image++) {
+		struct wim_image_metadata *imd = wim->image_metadata[image - 1];
+
+		if ((write_flags & WIMLIB_WRITE_FLAG_APPEND) &&
+		    is_image_metadata_in_wim(imd, wim))
+			continue;
+
+		if (!is_image_metadata_in_any_wim(imd)) {
+			ret = prepare_to_write_metadata_resource(imd);
+			if (ret)
+				return ret;
+		}
+		reference_metadata_for_write(imd, blob_list);
+	}
+	return 0;
+}
+
 /*
  * prepare_blob_list_for_write() -
  *
@@ -474,7 +515,8 @@ prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
 	if (may_filter_blobs(filter_ctx_ret))
 		filter_blob_list_for_write(blob_list_ret, filter_ctx_ret);
 
-	return 0;
+	return prepare_metadata_resources(wim, image, write_flags,
+					  blob_list_ret);
 }
 
 /* Return true if the specified blob is located in a WIM resource which can be
@@ -1870,6 +1912,7 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 {
 	int ret;
 	struct write_ctx ctx;
+	struct list_head blob_list;
 	struct list_head raw_copy_blobs;
 	int out_ctype;
 	u32 out_chunk_size;
@@ -1880,14 +1923,7 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 		.end_blob	= write_blob_end_read,
 		.ctx		= &ctx,
 	};
-	LIST_HEAD(blob_list);
 	memset(&ctx, 0, sizeof(ctx));
-
-	ret = prepare_blob_list_for_write(wim, image, write_flags, &blob_list,
-					  &ctx.filter_ctx);
-	if (ret)
-		return ret;
-
 
 	ctx.wim = wim;
 	ctx.out_fd = &wim->out_fd;
@@ -1898,6 +1934,12 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
 	ctx.max_part_size = max_part_size;
 	ctx.progress.write_streams.num_threads = num_threads;
+
+	ret = prepare_blob_list_for_write(wim, image, write_flags, &blob_list,
+					  &ctx.filter_ctx);
+	if (ret)
+		return ret;
+
 
 	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
 		out_ctype = wim->out_solid_compression_type;
