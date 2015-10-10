@@ -1347,7 +1347,7 @@ static int
 finish_pending_blobs(struct write_ctx *ctx)
 {
 	int ret;
-	
+
 	ret = finish_remaining_chunks(ctx);
 	if (ret)
 		return ret;
@@ -1458,13 +1458,13 @@ write_blob_list(struct list_head *blob_list,
 
 static int
 write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
-	    u64 max_part_size, struct filter_context *filter_ctx)
+	    u64 max_part_size)
 {
 	int ret;
 	struct write_ctx ctx;
 	struct list_head raw_copy_blobs;
-	int file_data_ctype;
-	u32 file_data_chunk_size;
+	int out_ctype;
+	u32 out_chunk_size;
 	const struct read_blob_callbacks cbs = {
 		.begin_blob	= write_blob_begin_read,
 		.consume_chunk	= write_blob_process_chunk,
@@ -1473,6 +1473,8 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	};
 	LIST_HEAD(file_blob_list);
 	LIST_HEAD(metadata_blob_list);
+
+	prepare_blob_list_for_write
 
 	memset(&ctx, 0, sizeof(ctx));
 
@@ -1488,11 +1490,11 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ctx.progress.write_streams.num_threads = num_threads;
 
 	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
-		file_data_ctype = wim->out_compression_type;
-		file_data_chunk_size = wim->out_chunk_size;
+		out_ctype = wim->out_solid_compression_type;
+		out_chunk_size = wim->out_solid_chunk_size;
 	} else {
-		file_data_ctype = wim->out_solid_compression_type;
-		file_data_chunk_size = wim->out_solid_chunk_size;
+		out_ctype = wim->out_compression_type;
+		out_chunk_size = wim->out_chunk_size;
 	}
 
 	/*prepare_blob_list_for_write(wim, image, write*/
@@ -2866,33 +2868,13 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		write_flags |= WIMLIB_WRITE_FLAG_SOLID;
 
 	if (unlikely(write_flags & WIMLIB_WRITE_FLAG_UNSAFE_COMPACT)) {
-
 		/* In-place compaction  */
-
 		WARNING("The WIM file \"%"TS"\" is being compacted in place.\n"
 			"          Do *not* interrupt the operation, or else "
 			"the WIM file will be\n"
 			"          corrupted!", wim->filename);
 		wim->being_compacted = 1;
 		old_wim_end = WIM_HEADER_DISK_SIZE;
-
-		ret = prepare_blob_list_for_write(wim, WIMLIB_ALL_IMAGES,
-						  write_flags, &blob_list,
-						  &filter_ctx);
-		if (ret)
-			goto out;
-
-		if (wim_has_metadata(wim)) {
-			/* Add existing metadata resources to be compacted along
-			 * with the file resources.  */
-			for (int i = 0; i < wim->hdr.image_count; i++) {
-				struct wim_image_metadata *imd = wim->image_metadata[i];
-				if (is_image_metadata_in_wim(imd, wim)) {
-					fully_reference_blob_for_write(imd->metadata_blob,
-								       &blob_list);
-				}
-			}
-		}
 	} else {
 		u64 old_blob_table_end, old_xml_begin, old_xml_end;
 
@@ -2948,15 +2930,6 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		ret = check_resource_offsets(wim, old_wim_end);
 		if (ret)
 			goto out;
-
-		ret = prepare_blob_list_for_write(wim, WIMLIB_ALL_IMAGES,
-						  write_flags, &blob_list,
-						  &filter_ctx);
-		if (ret)
-			goto out;
-
-		if (write_flags & WIMLIB_WRITE_FLAG_NO_NEW_BLOBS)
-			wimlib_assert(list_empty(&blob_list));
 	}
 
 	ret = open_wim_writable(wim, wim->filename, O_RDWR);
@@ -2982,19 +2955,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		goto out_restore_hdr;
 	}
 
-	ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
-				    write_flags_to_resource_flags(write_flags),
-				    num_threads, UINT64_MAX, &filter_ctx);
-	if (ret)
-		goto out_truncate;
-
-	ret = write_metadata_resources(wim, WIMLIB_ALL_IMAGES, write_flags,
-				       &blob_table_list);
-	if (ret)
-		goto out_truncate;
-
-	ret = finish_write(wim, WIMLIB_ALL_IMAGES, write_flags,
-			   &blob_table_list);
+	ret = write_blobs(wim, image, write_flags, num_threads, UINT64_MAX);
 	if (ret)
 		goto out_truncate;
 
