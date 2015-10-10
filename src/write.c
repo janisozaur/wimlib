@@ -2447,8 +2447,6 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	  int write_flags, unsigned num_threads, u64 max_part_size)
 {
 	int ret;
-	struct list_head blob_list;
-	struct filter_context filter_ctx;
 
 	/* A valid image (or all images) must be specified.  */
 	if (image != WIMLIB_ALL_IMAGES &&
@@ -2774,9 +2772,6 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 {
 	int ret;
 	off_t old_wim_end;
-	struct list_head blob_list;
-	LIST_HEAD(blob_table_list);
-	struct filter_context filter_ctx;
 
 	/* Include an integrity table by default if no preference was given and
 	 * the WIM already had an integrity table.  */
@@ -2887,7 +2882,8 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		goto out_restore_hdr;
 	}
 
-	ret = write_common(wim, image, write_flags, num_threads, UINT64_MAX);
+	ret = write_common(wim, WIMLIB_ALL_IMAGES, write_flags, num_threads,
+			   UINT64_MAX);
 	if (ret)
 		goto out_truncate;
 
