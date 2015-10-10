@@ -663,6 +663,9 @@ struct write_ctx {
 	 * compressing chunks of data, or NULL if chunks are being written
 	 * uncompressed.  */
 	struct chunk_compressor *compressor;
+	
+	int out_ctype;
+	u32 out_chunk_size;
 
 	/* A buffer of size @out_chunk_size that has been loaned out from the
 	 * chunk compressor and is currently being filled with the uncompressed
@@ -674,6 +677,8 @@ struct write_ctx {
 
 	/* List of blobs that currently have chunks being compressed.  */
 	struct list_head blobs_being_compressed;
+
+	struct list_head blobs_pending_raw_copy;
 
 	/* List of blobs in the solid resource.  Blobs are moved here after
 	 * @blobs_being_compressed only when writing a solid resource.  */
@@ -1008,6 +1013,101 @@ done_with_blob(struct blob_descriptor *blob, struct write_ctx *ctx)
 	return do_done_with_blob(blob, ctx->wim->progfunc, ctx->wim->progctx);
 }
 
+/* Copy a raw compressed resource located in another WIM file to the WIM file
+ * being written.  */
+static int
+write_raw_copy_resource(struct wim_resource_descriptor *in_rdesc,
+			struct filedes *out_fd,
+			struct list_head *blob_table_list)
+{
+	u64 cur_read_offset;
+	u64 end_read_offset;
+	u8 buf[BUFFER_SIZE];
+	size_t bytes_to_read;
+	int ret;
+	struct filedes *in_fd;
+	struct blob_descriptor *blob;
+	u64 out_offset_in_wim;
+
+	/* Copy the raw data.  */
+	cur_read_offset = in_rdesc->offset_in_wim;
+	end_read_offset = cur_read_offset + in_rdesc->size_in_wim;
+
+	out_offset_in_wim = out_fd->offset;
+
+	if (in_rdesc->is_pipable) {
+		if (cur_read_offset < sizeof(struct pwm_blob_hdr))
+			return WIMLIB_ERR_INVALID_PIPABLE_WIM;
+		cur_read_offset -= sizeof(struct pwm_blob_hdr);
+		out_offset_in_wim += sizeof(struct pwm_blob_hdr);
+	}
+	in_fd = &in_rdesc->wim->in_fd;
+	wimlib_assert(cur_read_offset != end_read_offset);
+
+	if (likely(!in_rdesc->wim->being_compacted) ||
+	    in_rdesc->offset_in_wim > out_fd->offset) {
+		do {
+			bytes_to_read = min(sizeof(buf),
+					    end_read_offset - cur_read_offset);
+
+			ret = full_pread(in_fd, buf, bytes_to_read,
+					 cur_read_offset);
+			if (ret)
+				return ret;
+
+			ret = full_write(out_fd, buf, bytes_to_read);
+			if (ret)
+				return ret;
+
+			cur_read_offset += bytes_to_read;
+
+		} while (cur_read_offset != end_read_offset);
+	} else {
+		/* Optimization: the WIM file is being compacted and the
+		 * resource being written is already in the desired location.
+		 * Skip over the data instead of re-writing it.  */
+
+		/* Due the earlier check for overlapping resources, it should
+		 * never be the case that we already overwrote the resource.  */
+		wimlib_assert(!(in_rdesc->offset_in_wim < out_fd->offset));
+
+		if (-1 == filedes_seek(out_fd, out_fd->offset + in_rdesc->size_in_wim))
+			return WIMLIB_ERR_WRITE;
+	}
+
+	list_for_each_entry(blob, &in_rdesc->blob_list, rdesc_node) {
+		if (blob->will_be_in_output_wim) {
+			blob_set_out_reshdr_for_reuse(blob);
+			if (in_rdesc->flags & WIM_RESHDR_FLAG_SOLID)
+				blob->out_res_offset_in_wim = out_offset_in_wim;
+			else
+				blob->out_reshdr.offset_in_wim = out_offset_in_wim;
+			list_add_tail(&blob->blob_table_list, blob_table_list);
+		}
+	}
+	return 0;
+}
+
+static int
+write_pending_raw_copy_blobs(struct write_ctx *ctx)
+{
+	struct blob_descriptor *blob;
+	int ret;
+
+	while (!list_empty(&ctx->blobs_pending_raw_copy)) {
+		blob = list_first_entry(&ctx->blobs_pending_raw_copy,
+					struct blob_descriptor,
+					write_blobs_list);
+		ret = write_raw_copy_resource(blob->in_rdesc, ctx->out_fd,
+					      &ctx->blob_table_list);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
 static int
 begin_wim_file(struct write_ctx *ctx)
 {
@@ -1123,6 +1223,13 @@ write_blob_begin_read(struct blob_descriptor *blob, void *_ctx)
 	int ret;
 
 	wimlib_assert(blob->size > 0);
+
+	if (can_raw_copy(blob, ctx->write_flags, ctx->out_ctype,
+			 ctx->out_chunk_size)) {
+		list_move_tail(&blob->write_blobs_list,
+			       &ctx->blobs_pending_raw_copy);
+		return BEGIN_BLOB_STATUS_SKIP_BLOB;
+	}
 
 	ctx->cur_read_blob_offset = 0;
 	ctx->cur_read_blob_size = blob->size;
@@ -1592,140 +1699,6 @@ tally_blob_list_stats(struct list_head *blob_list,
 	return 0;
 }
 
-/* Find blobs in @blob_list that can be copied to the output WIM in raw form
- * rather than compressed.  Delete these blobs from @blob_list and move them to
- * @raw_copy_blobs.  */
-static u64
-find_raw_copy_blobs(struct list_head *blob_list, int write_flags,
-		    int out_ctype, u32 out_chunk_size,
-		    struct list_head *raw_copy_blobs)
-{
-	struct blob_descriptor *blob, *tmp;
-	u64 num_nonraw_bytes = 0;
-
-	INIT_LIST_HEAD(raw_copy_blobs);
-
-	/* Initialize temporary raw_copy_ok flag.  */
-	list_for_each_entry(blob, blob_list, write_blobs_list)
-		if (blob->blob_location == BLOB_IN_WIM)
-			blob->rdesc->raw_copy_ok = 0;
-
-	list_for_each_entry_safe(blob, tmp, blob_list, write_blobs_list) {
-		if (can_raw_copy(blob, write_flags,
-				 out_ctype, out_chunk_size))
-		{
-			blob->rdesc->raw_copy_ok = 1;
-			list_move_tail(&blob->write_blobs_list, raw_copy_blobs);
-		} else {
-			num_nonraw_bytes += blob->size;
-		}
-	}
-
-	return num_nonraw_bytes;
-}
-
-/* Copy a raw compressed resource located in another WIM file to the WIM file
- * being written.  */
-static int
-write_raw_copy_resource(struct wim_resource_descriptor *in_rdesc,
-			struct filedes *out_fd,
-			struct list_head *blob_table_list)
-{
-	u64 cur_read_offset;
-	u64 end_read_offset;
-	u8 buf[BUFFER_SIZE];
-	size_t bytes_to_read;
-	int ret;
-	struct filedes *in_fd;
-	struct blob_descriptor *blob;
-	u64 out_offset_in_wim;
-
-	/* Copy the raw data.  */
-	cur_read_offset = in_rdesc->offset_in_wim;
-	end_read_offset = cur_read_offset + in_rdesc->size_in_wim;
-
-	out_offset_in_wim = out_fd->offset;
-
-	if (in_rdesc->is_pipable) {
-		if (cur_read_offset < sizeof(struct pwm_blob_hdr))
-			return WIMLIB_ERR_INVALID_PIPABLE_WIM;
-		cur_read_offset -= sizeof(struct pwm_blob_hdr);
-		out_offset_in_wim += sizeof(struct pwm_blob_hdr);
-	}
-	in_fd = &in_rdesc->wim->in_fd;
-	wimlib_assert(cur_read_offset != end_read_offset);
-
-	if (likely(!in_rdesc->wim->being_compacted) ||
-	    in_rdesc->offset_in_wim > out_fd->offset) {
-		do {
-			bytes_to_read = min(sizeof(buf),
-					    end_read_offset - cur_read_offset);
-
-			ret = full_pread(in_fd, buf, bytes_to_read,
-					 cur_read_offset);
-			if (ret)
-				return ret;
-
-			ret = full_write(out_fd, buf, bytes_to_read);
-			if (ret)
-				return ret;
-
-			cur_read_offset += bytes_to_read;
-
-		} while (cur_read_offset != end_read_offset);
-	} else {
-		/* Optimization: the WIM file is being compacted and the
-		 * resource being written is already in the desired location.
-		 * Skip over the data instead of re-writing it.  */
-
-		/* Due the earlier check for overlapping resources, it should
-		 * never be the case that we already overwrote the resource.  */
-		wimlib_assert(!(in_rdesc->offset_in_wim < out_fd->offset));
-
-		if (-1 == filedes_seek(out_fd, out_fd->offset + in_rdesc->size_in_wim))
-			return WIMLIB_ERR_WRITE;
-	}
-
-	list_for_each_entry(blob, &in_rdesc->blob_list, rdesc_node) {
-		if (blob->will_be_in_output_wim) {
-			blob_set_out_reshdr_for_reuse(blob);
-			if (in_rdesc->flags & WIM_RESHDR_FLAG_SOLID)
-				blob->out_res_offset_in_wim = out_offset_in_wim;
-			else
-				blob->out_reshdr.offset_in_wim = out_offset_in_wim;
-			list_add_tail(&blob->blob_table_list, blob_table_list);
-		}
-	}
-	return 0;
-}
-
-/* Copy a list of raw compressed resources located in other WIM file(s) to the
- * WIM file being written.  */
-static int
-write_raw_copy_resources(struct write_ctx *ctx, struct list_head *raw_copy_blobs)
-{
-	struct blob_descriptor *blob;
-	int ret;
-
-	list_for_each_entry(blob, raw_copy_blobs, write_blobs_list)
-		blob->rdesc->raw_copy_ok = 1;
-
-	list_for_each_entry(blob, raw_copy_blobs, write_blobs_list) {
-		if (blob->rdesc->raw_copy_ok) {
-			/* Write each solid resource only one time.  */
-			ret = write_raw_copy_resource(blob->rdesc, ctx->out_fd,
-						      &ctx->blob_table_list);
-			if (ret)
-				return ret;
-			blob->rdesc->raw_copy_ok = 0;
-		}
-		ret = do_write_progress(ctx, blob->size, 1, false);
-		if (ret)
-			return ret;
-	}
-	return 0;
-}
-
 /* Wait for and write all chunks pending in the compressor.  */
 static int
 finish_remaining_chunks(struct write_ctx *ctx)
@@ -1834,14 +1807,8 @@ static int
 init_compressor(struct write_ctx *ctx, int out_ctype, u32 out_chunk_size,
 		unsigned num_threads, u64 num_bytes_to_compress)
 {
-	int ret;
-
-	if (ctx->compressor &&
-	    ctx->compressor->out_ctype == out_ctype &&
-	    ctx->compressor->out_chunk_size == out_chunk_size)
-		return 0;
-
-	destroy_compressor(ctx);
+	ctx->out_ctype = out_ctype;
+	ctx->out_chunk_size = out_chunk_size;
 
 	if (out_ctype == WIMLIB_COMPRESSION_TYPE_NONE)
 		return 0;
@@ -1853,10 +1820,10 @@ init_compressor(struct write_ctx *ctx, int out_ctype, u32 out_chunk_size,
 	 * bytes needing to be compressed is less than a heuristic value.  */
 #ifdef ENABLE_MULTITHREADED_COMPRESSION
 	if (num_bytes_to_compress > max(2000000, out_chunk_size)) {
-		ret = new_parallel_chunk_compressor(out_ctype,
-						    out_chunk_size,
-						    num_threads, 0,
-						    &ctx->compressor);
+		int ret = new_parallel_chunk_compressor(out_ctype,
+							out_chunk_size,
+							num_threads, 0,
+							&ctx->compressor);
 		if (ret > 0) {
 			WARNING("Couldn't create parallel chunk compressor: %"TS".\n"
 				"          Falling back to single-threaded compression.",
@@ -1878,24 +1845,6 @@ sort_blob_list_for_write(struct list_head *blob_list)
 							   write_blobs_list));
 }
 
-static int
-write_blob_list(struct list_head *blob_list,
-		const struct read_blob_callbacks *cbs, struct write_ctx *ctx)
-{
-	int ret;
-
-	ret = read_blob_list(blob_list,
-			     offsetof(struct blob_descriptor, write_blobs_list),
-			     cbs,
-			     BLOB_LIST_ALREADY_SORTED |
-				VERIFY_BLOB_HASHES |
-				COMPUTE_MISSING_BLOB_HASHES);
-
-	if (!ret)
-		ret = finish_pending_blobs(ctx);
-	return ret;
-}
-
 /* Common code for WIM writing - shared between wimlib_write() and
  * wimlib_overwrite()  */
 static int
@@ -1906,7 +1855,6 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	struct write_ctx ctx;
 	struct list_head blob_list;
 	struct list_head metadata_list;
-	struct list_head raw_copy_blobs;
 	int out_ctype;
 	u32 out_chunk_size;
 	u64 num_nonraw_bytes;
@@ -1924,6 +1872,7 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ctx.write_flags = write_flags;
 	INIT_LIST_HEAD(&ctx.blob_table_list);
 	INIT_LIST_HEAD(&ctx.blobs_being_compressed);
+	INIT_LIST_HEAD(&ctx.blobs_pending_raw_copy);
 	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
 	ctx.max_part_size = max_part_size;
 	ctx.progress.write_streams.num_threads = num_threads;
@@ -1931,15 +1880,7 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ret = prepare_blob_list_for_write(wim, image, write_flags, &blob_list,
 					  &metadata_list, &ctx.filter_ctx);
 	if (ret)
-		return ret;
-
-	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
-		out_ctype = wim->out_solid_compression_type;
-		out_chunk_size = wim->out_solid_chunk_size;
-	} else {
-		out_ctype = wim->out_compression_type;
-		out_chunk_size = wim->out_chunk_size;
-	}
+		goto out;
 
 	/*
 	 * We normally sort the blobs to write by a "sequential" order that is
@@ -1956,14 +1897,14 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 
 	ret = sort_blob_list_for_write(&blob_list);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = tally_blob_list_stats(&blob_list, &ctx);
 	if (ret)
-		return ret;
+		goto out;
 	ret = tally_blob_list_stats(&metadata_list, &ctx);
 	if (ret)
-		return ret;
+		goto out;
 
 	if ((write_flags & (WIMLIB_WRITE_FLAG_SOLID |
 			    WIMLIB_WRITE_FLAG_NO_SOLID_SORT))
@@ -1982,42 +1923,47 @@ write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 
 	list_splice(&metadata_list, &blob_list);
 
-	num_nonraw_bytes = find_raw_copy_blobs(&blob_list,
-					       write_flags,
-					       out_ctype,
-					       out_chunk_size,
-					       &raw_copy_blobs);
+	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
+		out_ctype = wim->out_solid_compression_type;
+		out_chunk_size = wim->out_solid_chunk_size;
+	} else {
+		out_ctype = wim->out_compression_type;
+		out_chunk_size = wim->out_chunk_size;
+	}
 
-	/* Copy any compressed resources for which the raw data can be reused
-	 * without decompression.  */
-	ret = write_raw_copy_resources(&ctx, &raw_copy_blobs);
+	ret = init_compressor(&ctx, out_ctype, out_chunk_size, num_threads,
+			      ctx.progress.write_streams.total_bytes);
 	if (ret)
-		goto out_destroy_context;
-
-	if (num_nonraw_bytes == 0)
-		goto out_destroy_context;
-
-	ret = init_compressor(&ctx, out_ctype, out_chunk_size,
-			      num_threads, num_nonraw_bytes);
-	if (ret)
-		goto out_destroy_context;
+		goto out;
 
 	ret = call_progress(wim->progfunc, WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
 			    &ctx.progress, wim->progctx);
 	if (ret)
-		goto out_destroy_context;
+		goto out;
 
 	if (ctx.write_flags & WIMLIB_WRITE_FLAG_SOLID) {
-		ret = begin_write_resource(&ctx, num_nonraw_bytes);
+		ret = begin_write_resource(&ctx,
+					   ctx.progress.write_streams.total_bytes);
 		if (ret)
-			goto out_destroy_context;
+			goto out;
 	}
 
-	ret = write_blob_list(&blob_list, &cbs, &ctx);
+	ret = read_blob_list(&blob_list,
+			     offsetof(struct blob_descriptor, write_blobs_list),
+			     &cbs,
+			     BLOB_LIST_ALREADY_SORTED |
+				VERIFY_BLOB_HASHES |
+				COMPUTE_MISSING_BLOB_HASHES);
 	if (ret)
-		goto out_destroy_context;
+		goto out;
 
-out_destroy_context:
+	ret = finish_pending_blobs(&ctx);
+	if (ret)
+		goto out;
+
+	return ret;
+
+out:
 	FREE(ctx.chunk_csizes);
 	destroy_compressor(&ctx);
 	return ret;
@@ -2066,66 +2012,6 @@ err:
 	ERROR_WITH_ERRNO("Write error");
 	return ret;
 }
-
-
-/*static int*/
-/*prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,*/
-			   /*struct list_head *blob_list)*/
-/*{*/
-	/*int ret;*/
-	/*int start_image;*/
-	/*int end_image;*/
-	/*int write_flags;*/
-
-	/*write_flags = write_flags_to_resource_flags(write_flags);*/
-
-	/*if (image == WIMLIB_ALL_IMAGES) {*/
-		/*start_image = 1;*/
-		/*end_image = wim->hdr.image_count;*/
-	/*} else {*/
-		/*start_image = image;*/
-		/*end_image = image;*/
-	/*}*/
-
-	/*for (int i = start_image; i <= end_image; i++) {*/
-		/*struct wim_image_metadata *imd;*/
-
-		/*imd = wim->image_metadata[i - 1];*/
-		/*if (!is_image_metadata_in_any_wim(imd)) {*/
-			/* The image was modified from the original, or was
-			 * newly added, so we have to build and write a new
-			 * metadata resource.  */
-			/*ret = write_metadata_resource(wim, i,*/
-						      /*write_flags);*/
-		/*} else if (is_image_metadata_in_wim(imd, wim) &&*/
-			   /*(write_flags & (WIMLIB_WRITE_FLAG_UNSAFE_COMPACT |*/
-					   /*WIMLIB_WRITE_FLAG_APPEND)))*/
-		/*{*/
-			/* The metadata resource is already in the WIM file.
-			 * For appends, we don't need to write it at all.  For
-			 * compactions, we re-write existing metadata resources
-			 * along with the existing file resources, not here.  */
-			/*if (write_flags & WIMLIB_WRITE_FLAG_APPEND)*/
-				/*blob_set_out_reshdr_for_reuse(imd->metadata_blob);*/
-			/*ret = 0;*/
-		/*} else {*/
-			/* The metadata resource is in a WIM file other than the
-			 * one being written to.  We need to rewrite it,
-			 * possibly compressed differently; but rebuilding the
-			 * metadata itself isn't necessary.  */
-			/*ret = write_wim_resource(imd->metadata_blob,*/
-						 /*&wim->out_fd,*/
-						 /*wim->out_compression_type,*/
-						 /*wim->out_chunk_size,*/
-						 /*write_flags);*/
-		/*}*/
-		/*if (ret)*/
-			/*return ret;*/
-		/*imd->metadata_blob->out_refcnt = 1;*/
-	/*}*/
-
-	/*return 0;*/
-/*}*/
 
 static int
 open_wim_writable(WIMStruct *wim, const tchar *path, int open_flags)
