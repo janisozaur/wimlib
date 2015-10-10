@@ -975,7 +975,7 @@ done_with_blob(struct blob_descriptor *blob, struct write_ctx *ctx)
 }
 
 static int
-begin_new_wim_file(struct write_ctx *ctx)
+begin_wim_file(struct write_ctx *ctx)
 {
 	if (ctx->write_flags & (WIMLIB_WRITE_FLAG_APPEND |
 				WIMLIB_WRITE_FLAG_UNSAFE_COMPACT))
@@ -983,6 +983,86 @@ begin_new_wim_file(struct write_ctx *ctx)
 
 	/*if (ctx->write_flags & WIMLIB_WRITE_FLAG_T*/
 	return 0;
+
+#if 0
+	if (part_size) {
+		tchar *dot;
+		size_t swm_name_len;
+
+		memset(&split_progress, 0, sizeof(split_progress));
+		split_progress.split.cur_part_number = 1;
+		split_progress.split.total_bytes = 0; // TODO
+		split_progress.split.completed_bytes = 0; // TODO
+		split_progress.split.total_parts = 0; // TODO
+		swm_name_len = tstrlen((const tchar *)path_or_fd);
+		swm_name_buf = alloca((swm_name_len + 20) * sizeof(tchar));
+		tstrcpy(swm_name_buf, (const tchar *)path_or_fd);
+		dot = tstrchr(swm_name_buf, T('.'));
+		if (dot) {
+			swm_base_name_len = dot - swm_name_buf;
+			swm_suffix = alloca((tstrlen(dot) + 1) * sizeof(tchar));
+			tstrcpy(swm_suffix, dot);
+		} else {
+			swm_base_name_len = swm_name_len;
+			swm_suffix = alloca(1 * sizeof(tchar));
+			swm_suffix[0] = T('\0');
+		}
+
+		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
+	} else {
+		wim->out_hdr.part_number = 1;
+		wim->out_hdr.total_parts = 1;
+	}
+
+		/* Writing to an on-disk file  */
+		const tchar *path = path_or_fd;
+		if (!path || !*path)
+			return WIMLIB_ERR_INVALID_PARAM;
+		ret = open_wim_writable(wim, path,
+					O_TRUNC | O_CREAT | O_RDWR);
+		if (ret)
+			goto out_cleanup;
+	}
+
+	/* Write the initial header.  This is merely a "dummy" header
+	 * since it doesn't have resource entries filled in yet, so it
+	 * will be overwritten later (unless writing a pipable WIM).  */
+	if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
+		wim->out_hdr.flags |= WIM_HDR_FLAG_WRITE_IN_PROGRESS;
+	ret = write_wim_header(&wim->out_hdr, &wim->out_fd, wim->out_fd.offset);
+	wim->out_hdr.flags &= ~WIM_HDR_FLAG_WRITE_IN_PROGRESS;
+	if (ret)
+		goto out_cleanup;
+
+	/* If it's a pipable WIM, write the initial XML data.  */
+	if (write_flags & WIMLIB_WRITE_FLAG_PIPABLE) {
+		struct wim_reshdr xml_reshdr;
+
+		ret = write_wim_xml_data(wim, image, WIM_TOTALBYTES_OMIT,
+					 &xml_reshdr, write_flags);
+		if (ret)
+			goto out_cleanup;
+	}
+
+		u16 part_number = split_progress.split.cur_part_number;
+
+		if (part_number != 1) {
+			tsprintf(swm_name_buf + swm_base_name_len,
+				 T("%u%"TS), part_number, swm_suffix);
+		}
+		split_progress.split.part_name = swm_name_buf;
+
+		ret = call_progress(wim->progfunc,
+				    WIMLIB_PROGRESS_MSG_SPLIT_BEGIN_PART,
+				    &split_progress,
+				    wim->progctx);
+		if (ret)
+			goto out_cleanup;
+
+		wim->out_hdr.part_number = part_number;
+		path_or_fd = swm_name_buf;
+#endif
+
 }
 
 static int
@@ -991,6 +1071,14 @@ finish_wim_file(struct write_ctx *ctx)
 	if (ctx->write_flags & (WIMLIB_WRITE_FLAG_APPEND |
 				WIMLIB_WRITE_FLAG_UNSAFE_COMPACT))
 		return 0;
+
+			/*ret = call_progress(wim->progfunc,*/
+					    /*WIMLIB_PROGRESS_MSG_SPLIT_END_PART,*/
+					    /*&split_progress,*/
+					    /*wim->progctx);*/
+			/*if (ret)*/
+				/*return ret;*/
+			/*split_progress.split.cur_part_number++;*/
 }
 
 /* Begin processing a blob for writing.  */
@@ -1774,9 +1862,11 @@ write_blob_list(struct list_head *blob_list,
 	return ret;
 }
 
+/* Common code for WIM writing - shared between wimlib_write() and
+ * wimlib_overwrite()  */
 static int
-write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
-	    u64 max_part_size)
+write_common(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
+	     u64 max_part_size)
 {
 	int ret;
 	struct write_ctx ctx;
@@ -2352,21 +2442,13 @@ should_default_to_solid_compression(WIMStruct *wim, int write_flags)
 		wim_has_solid_resources(wim);
 }
 
-struct split_context {
-	union wimlib_progress_info split_progress;
-	tchar *swm_name_buf;
-	tchar *swm_suffix;
-	size_t swm_base_name_len;
-};
-
 static int
 write_wim(WIMStruct *wim, const void *path_or_fd, int image,
-	  int write_flags, unsigned num_threads, u64 part_size)
+	  int write_flags, unsigned num_threads, u64 max_part_size)
 {
 	int ret;
 	struct list_head blob_list;
 	struct filter_context filter_ctx;
-	struct split_context ctx;
 
 	/* A valid image (or all images) must be specified.  */
 	if (image != WIMLIB_ALL_IMAGES &&
@@ -2392,7 +2474,8 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	/* A split WIM can't be written to a file descriptor.  */
-	if (part_size != 0 && (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR))
+	if (max_part_size != 0 &&
+	    (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR))
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	/* Only wimlib_overwrite() accepts UNSAFE_COMPACT.  */
@@ -2505,149 +2588,29 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	else
 		wim->out_hdr.boot_idx = 0;
 
-	if (part_size) {
-		tchar *dot;
-		size_t swm_name_len;
-
-		memset(&split_progress, 0, sizeof(split_progress));
-		split_progress.split.cur_part_number = 1;
-		split_progress.split.total_bytes = 0; // TODO
-		split_progress.split.completed_bytes = 0; // TODO
-		split_progress.split.total_parts = 0; // TODO
-		swm_name_len = tstrlen((const tchar *)path_or_fd);
-		swm_name_buf = alloca((swm_name_len + 20) * sizeof(tchar));
-		tstrcpy(swm_name_buf, (const tchar *)path_or_fd);
-		dot = tstrchr(swm_name_buf, T('.'));
-		if (dot) {
-			swm_base_name_len = dot - swm_name_buf;
-			swm_suffix = alloca((tstrlen(dot) + 1) * sizeof(tchar));
-			tstrcpy(swm_suffix, dot);
-		} else {
-			swm_base_name_len = swm_name_len;
-			swm_suffix = alloca(1 * sizeof(tchar));
-			swm_suffix[0] = T('\0');
-		}
-
-		wim->out_hdr.flags |= WIM_HDR_FLAG_SPANNED;
-	} else {
-		wim->out_hdr.part_number = 1;
-		wim->out_hdr.total_parts = 1;
-	}
-
-	ret = prepare_blob_list_for_write(wim, image, write_flags,
-					  &blob_list, &filter_ctx);
-	if (ret)
-		return ret;
-
-	write_flags = write_flags_to_resource_flags(write_flags);
-
-	for (;;) {
-		/* Writing a new WIM part  */
-
-		LIST_HEAD(blob_table_list);
-
-		if (part_size) {
-			u16 part_number = split_progress.split.cur_part_number;
-
-			if (part_number != 1) {
-				tsprintf(swm_name_buf + swm_base_name_len,
-					 T("%u%"TS), part_number, swm_suffix);
-			}
-			split_progress.split.part_name = swm_name_buf;
-
-			ret = call_progress(wim->progfunc,
-					    WIMLIB_PROGRESS_MSG_SPLIT_BEGIN_PART,
-					    &split_progress,
-					    wim->progctx);
-			if (ret)
-				goto out_cleanup;
-
-			wim->out_hdr.part_number = part_number;
-			path_or_fd = swm_name_buf;
-		}
-
-		/* Set up the output file descriptor.  */
-		if (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) {
-			/* File descriptor was explicitly provided.  */
-			int fd = *(const int *)path_or_fd;
-
-			if (fd < 0)
+	/* If a file descriptor was explicitly provided, set up and validate it.
+	 */
+	if (write_flags & WIMLIB_WRITE_FLAG_FILE_DESCRIPTOR) {
+		int fd = *(const int *)path_or_fd;
+		if (fd < 0)
+			return WIMLIB_ERR_INVALID_PARAM;
+		filedes_init(&wim->out_fd, fd);
+		if (!filedes_is_seekable(&wim->out_fd)) {
+			/* The file descriptor is a pipe.  */
+			if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
 				return WIMLIB_ERR_INVALID_PARAM;
-			filedes_init(&wim->out_fd, fd);
-			if (!filedes_is_seekable(&wim->out_fd)) {
-				/* The file descriptor is a pipe.  */
-				ret = WIMLIB_ERR_INVALID_PARAM;
-				if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
-					goto out_cleanup;
-				if (write_flags & WIMLIB_WRITE_FLAG_CHECK_INTEGRITY) {
-					ERROR("Can't include integrity check when "
-					      "writing pipable WIM to pipe!");
-					goto out_cleanup;
-				}
-			}
-		} else {
-			/* Writing to an on-disk file  */
-			const tchar *path = path_or_fd;
-			if (!path || !*path)
+			if (write_flags & WIMLIB_WRITE_FLAG_CHECK_INTEGRITY) {
+				ERROR("Can't include integrity check when "
+				      "writing pipable WIM to pipe!");
 				return WIMLIB_ERR_INVALID_PARAM;
-			ret = open_wim_writable(wim, path,
-						O_TRUNC | O_CREAT | O_RDWR);
-			if (ret)
-				goto out_cleanup;
-		}
-
-		/* Write the initial header.  This is merely a "dummy" header
-		 * since it doesn't have resource entries filled in yet, so it
-		 * will be overwritten later (unless writing a pipable WIM).  */
-		if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE))
-			wim->out_hdr.flags |= WIM_HDR_FLAG_WRITE_IN_PROGRESS;
-		ret = write_wim_header(&wim->out_hdr, &wim->out_fd, wim->out_fd.offset);
-		wim->out_hdr.flags &= ~WIM_HDR_FLAG_WRITE_IN_PROGRESS;
-		if (ret)
-			goto out_cleanup;
-
-		/* If it's a pipable WIM, write the initial XML data.  */
-		if (write_flags & WIMLIB_WRITE_FLAG_PIPABLE) {
-			struct wim_reshdr xml_reshdr;
-
-			ret = write_wim_xml_data(wim, image, WIM_TOTALBYTES_OMIT,
-						 &xml_reshdr, write_flags);
-			if (ret)
-				goto out_cleanup;
-		}
-
-		/* Write blobs  */
-		ret = write_blob_list(&blob_list,
-				      &wim->out_fd,
-				      write_flags,
-				      (write_flags & WIMLIB_WRITE_RES
-		ret = write_file_data_blobs(wim, &blob_list, &blob_table_list,
-					    write_flags, num_threads,
-					    part_size ? part_size : UINT64_MAX,
-					    &filter_ctx);
-		if (ret)
-			goto out_cleanup;
-
-		/* Write blob table, XML data, and (optional) integrity table.  */
-		ret = finish_write(wim, image, write_flags, &blob_table_list);
-		if (ret)
-			goto out_cleanup;
-
-		if (part_size) {
-			// progress.split.completed_bytes += swm_info->parts[part_number - 1].size;
-
-			ret = call_progress(wim->progfunc,
-					    WIMLIB_PROGRESS_MSG_SPLIT_END_PART,
-					    &split_progress,
-					    wim->progctx);
-			if (ret)
-				return ret;
-			split_progress.split.cur_part_number++;
+			}
 		}
 	}
 
-out_cleanup:
+	ret = write_common(wim, image, write_flags, num_threads, max_part_size);
+
 	(void)close_wim_writable(wim, write_flags);
+
 	return ret;
 }
 
@@ -2677,19 +2640,19 @@ wimlib_write_to_fd(WIMStruct *wim, int fd, int image, int write_flags,
 
 /* API function documented in wimlib.h  */
 WIMLIBAPI int
-wimlib_split(WIMStruct *wim, const tchar *swm_name, u64 part_size,
+wimlib_split(WIMStruct *wim, const tchar *swm_name, u64 max_part_size,
 	     int write_flags)
 {
 	if (write_flags & ~WIMLIB_WRITE_MASK_PUBLIC)
 		return WIMLIB_ERR_INVALID_PARAM;
 
-	if (!part_size)
+	if (!max_part_size)
 		return WIMLIB_ERR_INVALID_PARAM;
 
 	write_flags |= WIMLIB_WRITE_FLAG_RETAIN_GUID;
 
-	return write_wim(wim, swm_name, WIMLIB_ALL_IMAGES, write_flags,
-			 0, part_size);
+	return write_wim(wim, swm_name, WIMLIB_ALL_IMAGES,
+			 write_flags, 0, max_part_size);
 }
 
 /* Might we need to write blobs for at least one image?  */
@@ -2924,7 +2887,7 @@ overwrite_wim_inplace(WIMStruct *wim, int write_flags, unsigned num_threads)
 		goto out_restore_hdr;
 	}
 
-	ret = write_blobs(wim, image, write_flags, num_threads, UINT64_MAX);
+	ret = write_common(wim, image, write_flags, num_threads, UINT64_MAX);
 	if (ret)
 		goto out_truncate;
 

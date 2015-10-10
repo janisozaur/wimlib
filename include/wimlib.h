@@ -4197,7 +4197,7 @@ wimlib_set_wim_info(WIMStruct *wim, const struct wimlib_wim_info *info,
  * 	the first part.  The other parts will, by default, have the same name
  * 	with 2, 3, 4, ..., etc.  appended before the suffix.  However, the exact
  * 	names can be customized using the progress function.
- * @param part_size
+ * @param max_part_size
  * 	The maximum size per part, in bytes.  Unfortunately, it is not
  * 	guaranteed that this will really be the maximum size per part, because
  * 	some file resources in the WIM may be larger than this size, and the WIM
@@ -4213,7 +4213,7 @@ wimlib_set_wim_info(WIMStruct *wim, const struct wimlib_wim_info *info,
  * the following error codes:
  *
  * @retval ::WIMLIB_ERR_INVALID_PARAM
- * 	@p swm_name was not a nonempty string, or @p part_size was 0.
+ * 	@p swm_name was not a nonempty string, or @p max_part_size was 0.
  * @retval ::WIMLIB_ERR_UNSUPPORTED
  *	The WIM contains solid resources.  Splitting a WIM containing solid
  *	resources is not supported.
@@ -4224,10 +4224,8 @@ wimlib_set_wim_info(WIMStruct *wim, const struct wimlib_wim_info *info,
  * ::WIMLIB_PROGRESS_MSG_SPLIT_END_PART.
  */
 extern int
-wimlib_split(WIMStruct *wim,
-	     const wimlib_tchar *swm_name,
-	     uint64_t part_size,
-	     int write_flags);
+wimlib_split(WIMStruct *wim, const wimlib_tchar *swm_name,
+	     uint64_t max_part_size, int write_flags);
 
 /**
  * @ingroup G_general
