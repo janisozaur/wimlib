@@ -319,15 +319,12 @@ write_integrity_table(WIMStruct *wim,
 	new_table->num_entries = cpu_to_le32(new_table->num_entries);
 	new_table->chunk_size  = cpu_to_le32(new_table->chunk_size);
 
-	ret = write_wim_resource_from_buffer(new_table,
-					     new_table_size,
-					     false,
-					     &wim->out_fd,
-					     WIMLIB_COMPRESSION_TYPE_NONE,
-					     0,
-					     &wim->out_hdr.integrity_table_reshdr,
-					     NULL,
-					     0);
+	ret = write_uncompressed_resource(new_table,
+					  new_table_size,
+					  false,
+					  &wim->out_fd,
+					  &wim->out_hdr.integrity_table_reshdr,
+					  0);
 	FREE(new_table);
 	return ret;
 }

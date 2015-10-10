@@ -1172,15 +1172,12 @@ write_blob_table_from_blob_list(struct list_head *blob_list,
 
 	/* Write the blob table uncompressed.  Although wimlib can handle a
 	 * compressed blob table, MS software cannot.  */
-	ret = write_wim_resource_from_buffer(table_buf,
-					     table_size,
-					     true,
-					     out_fd,
-					     WIMLIB_COMPRESSION_TYPE_NONE,
-					     0,
-					     out_reshdr,
-					     NULL,
-					     write_resource_flags);
+	ret = write_uncompressed_resource(table_buf,
+					  table_size,
+					  true,
+					  out_fd,
+					  out_reshdr,
+					  write_resource_flags);
 	FREE(table_buf);
 	return ret;
 }
