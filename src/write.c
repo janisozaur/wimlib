@@ -1424,34 +1424,41 @@ init_compressor(struct write_ctx *ctx, int out_ctype, u32 out_chunk_size,
 		}
 	}
 #endif
-	if (ctx.compressor == NULL)
+	if (ctx->compressor == NULL)
 		return new_serial_chunk_compressor(out_ctype, out_chunk_size,
-						   &ctx.compressor);
+						   &ctx->compressor);
 	return 0;
 }
 
 static int
-read_blob_list_and_write(struct list_head *blob_list,
-			 const struct read_blob_callbacks *cbs,
-			 struct write_ctx *ctx)
+sort_blob_list_for_write(struct list_head *blob_list)
+{
+	return sort_blob_list_by_sequential_order(blob_list,
+						  offsetof(struct blob_descriptor,
+							   write_blobs_list));
+}
+
+static int
+write_blob_list(struct list_head *blob_list,
+		const struct read_blob_callbacks *cbs, struct write_ctx *ctx)
 {
 	int ret;
 
 	ret = read_blob_list(blob_list,
 			     offsetof(struct blob_descriptor, write_blobs_list),
-			     &cbs,
+			     cbs,
 			     BLOB_LIST_ALREADY_SORTED |
 				VERIFY_BLOB_HASHES |
 				COMPUTE_MISSING_BLOB_HASHES);
 
 	if (!ret)
-		ret = finish_pending_blobs(&ctx);
+		ret = finish_pending_blobs(ctx);
 	return ret;
 }
 
 static int
 write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
-	    u64 max_part_size, struct filter_ctx *filter_ctx)
+	    u64 max_part_size, struct filter_context *filter_ctx)
 {
 	int ret;
 	struct write_ctx ctx;
@@ -1470,18 +1477,15 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	memset(&ctx, 0, sizeof(ctx));
 
 	ctx.wim = wim;
-	ctx.out_fd = wim->out_fd;
+	ctx.out_fd = &wim->out_fd;
 	ctx.image = image;
-	ctx.blob_table = blob_table;
+	ctx.write_flags = write_flags;
 	INIT_LIST_HEAD(&ctx.blob_table_list);
 	INIT_LIST_HEAD(&ctx.blobs_being_compressed);
 	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
 	ctx.max_part_size = max_part_size;
-	ctx.write_flags = write_flags_to_resource_flags(write_flags);
 	ctx.filter_ctx = filter_ctx;
-	ctx.progress_data.progfunc = wim->progfunc;
-	ctx.progress_data.progctx = progctx;
-	ctx.progress_data.progress.write_streams.num_threads = ctx.compressor->num_threads;
+	ctx.progress.write_streams.num_threads = num_threads;
 
 	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
 		file_data_ctype = wim->out_compression_type;
@@ -1506,30 +1510,30 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	 * measure of similarity of their actual contents.
 	 */
 
-	ret = sort_blob_list_by_sequential_order(file_blob_list,
-						 offsetof(struct blob_descriptor,
-							  write_blobs_list));
+	ret = sort_blob_list_for_write(&metadata_blob_list);
+	if (!ret)
+		ret = tally_blob_list_stats(&metadata_blob_list, &ctx);
+	if (!ret)
+		ret = sort_blob_list_for_write(&file_blob_list);
+	if (!ret)
+		ret = tally_blob_list_stats(&file_blob_list, &ctx);
 	if (ret)
 		return ret;
 
-	ret = tally_blob_list_stats(metadata_blob_list, &ctx);
-	if (ret)
-		return ret;
-
-	ret = tally_blob_list_stats(file_blob_list, &ctx);
-	if (ret)
-		return ret;
-
-	if (write_flags & WIMLIB_WRITE_FLAG_SOLID_SORT) {
-		ret = sort_blob_list_for_solid_compression(file_blob_list);
+	if ((write_flags & (WIMLIB_WRITE_FLAG_SOLID |
+			    WIMLIB_WRITE_FLAG_NO_SOLID_SORT))
+		== WIMLIB_WRITE_FLAG_SOLID)
+	{
+		ret = sort_blob_list_for_solid_compression(&file_blob_list);
 		if (unlikely(ret))
-			WARNING("Failed to sort blobs for solid compression. Continuing anyways.");
+			WARNING("Failed to sort blobs for solid compression. "
+				"Continuing anyways.");
 	}
 
 	/* If needed, set auxiliary information so that we can detect when the
 	 * library has finished using each external file.  */
-	if (unlikely(write_flags & WIMLIB_WRITE_FLAG_SEND_DONE_WITH_FILE))
-		init_done_with_file_info(file_blob_list);
+	if (unlikely(write_flags & WIMLIB_WRITE_FLAG_SEND_DONE_WITH_FILE_MESSAGES))
+		init_done_with_file_info(&file_blob_list);
 
 	find_raw_copy_blobs(file_blob_list, write_flags, out_ctype,
 			    out_chunk_size, &raw_copy_blobs);
@@ -1539,7 +1543,7 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	ret = write_raw_copy_resources(&raw_copy_blobs, ctx.out_fd,
 				       blob_table_list, &ctx.progress_data);
 
-	if (ret || num_nonraw_bytes == 0)
+	if (ret)
 		goto out_destroy_context;
 
 	ret = call_progress(wim->progfunc, WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
@@ -1555,7 +1559,7 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 				      sum_blob_sizes(metadata_blob_list));
 		if (ret)
 			goto out_destroy_context;
-		ret = read_blob_list_and_write(metadata_blob_list, &cbs, &ctx);
+		ret = write_blob_list(metadata_blob_list, &cbs, &ctx);
 		if (ret)
 			goto out_destroy_context;
 		ctx.write_flags = saved_flags;
@@ -1577,7 +1581,7 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 				goto out_destroy_context;
 		}
 
-		ret = read_blob_list_and_write(file_blob_list, &cbs, &ctx);
+		ret = write_blob_list(file_blob_list, &cbs, &ctx);
 		if (ret)
 			goto out_destroy_context;
 	}
