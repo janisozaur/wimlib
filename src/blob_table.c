@@ -1094,7 +1094,7 @@ write_blob_table_from_blob_list(struct list_head *blob_list,
 				struct filedes *out_fd,
 				u16 part_number,
 				struct wim_reshdr *out_reshdr,
-				int write_resource_flags)
+				int write_flags)
 {
 	size_t table_size;
 	struct blob_descriptor *blob;
@@ -1170,7 +1170,7 @@ write_blob_table_from_blob_list(struct list_head *blob_list,
 					  true,
 					  out_fd,
 					  out_reshdr,
-					  write_resource_flags);
+					  write_flags);
 	FREE(table_buf);
 	return ret;
 }

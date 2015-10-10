@@ -1227,7 +1227,7 @@ restore_document_after_write(struct wim_xml_info *info, int image,
  */
 int
 write_wim_xml_data(WIMStruct *wim, int image, u64 total_bytes,
-		   struct wim_reshdr *out_reshdr, int write_resource_flags)
+		   struct wim_reshdr *out_reshdr, int write_flags)
 {
 	struct wim_xml_info *info = wim->xml_info;
 	long ret;
@@ -1272,7 +1272,7 @@ write_wim_xml_data(WIMStruct *wim, int image, u64 total_bytes,
 					  true,
 					  &wim->out_fd,
 					  out_reshdr,
-					  write_resource_flags);
+					  write_flags);
 out_free_buffer:
 	xmlBufferFree(buffer);
 out_restore_document:

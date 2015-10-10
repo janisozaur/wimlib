@@ -29,6 +29,6 @@ write_uncompressed_resource(const void *buf,
 			    bool is_metadata,
 			    struct filedes *out_fd,
 			    struct wim_reshdr *out_reshdr,
-			    int write_resource_flags);
+			    int write_flags);
 
 #endif /* _WIMLIB_WRITE_H */

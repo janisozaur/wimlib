@@ -147,6 +147,336 @@ may_filter_blobs(const struct filter_context *ctx)
 	return (may_soft_filter_blobs(ctx) || may_hard_filter_blobs(ctx));
 }
 
+struct blob_size_table {
+	struct hlist_head *array;
+	size_t num_entries;
+	size_t capacity;
+};
+
+static int
+init_blob_size_table(struct blob_size_table *tab, size_t capacity)
+{
+	tab->array = CALLOC(capacity, sizeof(tab->array[0]));
+	if (tab->array == NULL)
+		return WIMLIB_ERR_NOMEM;
+	tab->num_entries = 0;
+	tab->capacity = capacity;
+	return 0;
+}
+
+static void
+destroy_blob_size_table(struct blob_size_table *tab)
+{
+	FREE(tab->array);
+}
+
+static int
+blob_size_table_insert(struct blob_descriptor *blob, void *_tab)
+{
+	struct blob_size_table *tab = _tab;
+	size_t pos;
+	struct blob_descriptor *same_size_blob;
+
+	if (blob->is_metadata)
+		return 0;
+
+	pos = hash_u64(blob->size) % tab->capacity;
+	blob->unique_size = 1;
+	hlist_for_each_entry(same_size_blob, &tab->array[pos], hash_list_2) {
+		if (same_size_blob->size == blob->size) {
+			blob->unique_size = 0;
+			same_size_blob->unique_size = 0;
+			break;
+		}
+	}
+
+	hlist_add_head(&blob->hash_list_2, &tab->array[pos]);
+	tab->num_entries++;
+	return 0;
+}
+
+struct find_blobs_ctx {
+	WIMStruct *wim;
+	int write_flags;
+	struct list_head blob_list;
+	struct blob_size_table blob_size_tab;
+};
+
+static void
+reference_blob_for_write(struct blob_descriptor *blob,
+			 struct list_head *blob_list, u32 nref)
+{
+	if (!blob->will_be_in_output_wim) {
+		blob->out_refcnt = 0;
+		list_add_tail(&blob->write_blobs_list, blob_list);
+		blob->will_be_in_output_wim = 1;
+	}
+	blob->out_refcnt += nref;
+}
+
+static int
+fully_reference_blob_for_write(struct blob_descriptor *blob, void *_blob_list)
+{
+	struct list_head *blob_list = _blob_list;
+	blob->will_be_in_output_wim = 0;
+	reference_blob_for_write(blob, blob_list, blob->refcnt);
+	return 0;
+}
+
+static int
+inode_find_blobs_to_reference(const struct wim_inode *inode,
+			      const struct blob_table *table,
+			      struct list_head *blob_list)
+{
+	wimlib_assert(inode->i_nlink > 0);
+
+	for (unsigned i = 0; i < inode->i_num_streams; i++) {
+		struct blob_descriptor *blob;
+		const u8 *hash;
+
+		blob = stream_blob(&inode->i_streams[i], table);
+		if (blob) {
+			reference_blob_for_write(blob, blob_list, inode->i_nlink);
+		} else {
+			hash = stream_hash(&inode->i_streams[i]);
+			if (!is_zero_hash(hash))
+				return blob_not_found_error(inode, hash);
+		}
+	}
+	return 0;
+}
+
+static int
+do_blob_set_not_in_output_wim(struct blob_descriptor *blob, void *_ignore)
+{
+	blob->will_be_in_output_wim = 0;
+	return 0;
+}
+
+static int
+image_find_blobs_to_reference(WIMStruct *wim)
+{
+	struct wim_image_metadata *imd;
+	struct wim_inode *inode;
+	struct blob_descriptor *blob;
+	struct list_head *blob_list;
+	int ret;
+
+	imd = wim_get_current_image_metadata(wim);
+
+	image_for_each_unhashed_blob(blob, imd)
+		blob->will_be_in_output_wim = 0;
+
+	blob_list = wim->private;
+	image_for_each_inode(inode, imd) {
+		ret = inode_find_blobs_to_reference(inode,
+						    wim->blob_table,
+						    blob_list);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int
+prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
+					       int image,
+					       int blobs_ok,
+					       struct list_head *blob_list_ret)
+{
+	int ret;
+	int i;
+	struct wim_image_metadata *imd;
+	struct blob_descriptor *blob;
+
+	INIT_LIST_HEAD(blob_list_ret);
+
+	if (blobs_ok && (image == WIMLIB_ALL_IMAGES ||
+			 (image == 1 && wim->hdr.image_count == 1)))
+	{
+		/* Fast case:  Assume that all blobs are being written and that
+		 * the reference counts are correct.  */
+		for_blob_in_table(wim->blob_table,
+				  fully_reference_blob_for_write,
+				  blob_list_ret);
+		for (i = 0; i < wim->hdr.image_count; i++) {
+			imd = wim->image_metadata[i];
+			image_for_each_unhashed_blob(blob, imd)
+				fully_reference_blob_for_write(blob, blob_list_ret);
+		}
+	} else {
+		/* Slow case:  Walk through the images being written and
+		 * determine the blobs referenced.  */
+		for_blob_in_table(wim->blob_table,
+				  do_blob_set_not_in_output_wim, NULL);
+		wim->private = blob_list_ret;
+		ret = for_image(wim, image, image_find_blobs_to_reference);
+		if (ret)
+			return ret;
+	}
+
+	/* Reference metadata resources  */
+	for (i = (image == WIMLIB_ALL_IMAGES ? 1 : image);
+	     i <= (image == WIMLIB_ALL_IMAGES ? wim->hdr.image_count : image);
+	     i++)
+	{
+		imd = wim->image_metadata[i];
+		blob = imd->metadata_blob;
+		blob->will_be_in_output_wim = 0;
+		reference_blob_for_write(blob, blob_list_ret, 1);
+	}
+
+	return 0;
+}
+
+struct insert_other_if_hard_filtered_ctx {
+	struct blob_size_table *tab;
+	struct filter_context *filter_ctx;
+};
+
+static int
+insert_other_if_hard_filtered(struct blob_descriptor *blob, void *_ctx)
+{
+	struct insert_other_if_hard_filtered_ctx *ctx = _ctx;
+
+	if (!blob->will_be_in_output_wim &&
+	    blob_hard_filtered(blob, ctx->filter_ctx))
+		blob_size_table_insert(blob, ctx->tab);
+	return 0;
+}
+
+static int
+determine_blob_size_uniquity(struct list_head *blob_list,
+			     struct blob_table *table,
+			     struct filter_context *filter_ctx)
+{
+	int ret;
+	struct blob_size_table tab;
+	struct blob_descriptor *blob;
+
+	ret = init_blob_size_table(&tab, 9001);
+	if (ret)
+		return ret;
+
+	if (may_hard_filter_blobs(filter_ctx)) {
+		struct insert_other_if_hard_filtered_ctx ctx = {
+			.tab = &tab,
+			.filter_ctx = filter_ctx,
+		};
+		for_blob_in_table(table, insert_other_if_hard_filtered, &ctx);
+	}
+
+	list_for_each_entry(blob, blob_list, write_blobs_list)
+		blob_size_table_insert(blob, &tab);
+
+	destroy_blob_size_table(&tab);
+	return 0;
+}
+
+static void
+filter_blob_list_for_write(struct list_head *blob_list,
+			   struct filter_context *filter_ctx)
+{
+	struct blob_descriptor *blob, *tmp;
+
+	list_for_each_entry_safe(blob, tmp, blob_list, write_blobs_list) {
+		int status = blob_filtered(blob, filter_ctx);
+
+		if (status == 0) {
+			/* Not filtered.  */
+			continue;
+		} else {
+			if (status > 0) {
+				/* Soft filtered.  */
+			} else {
+				/* Hard filtered.  */
+				blob->will_be_in_output_wim = 0;
+				list_del(&blob->blob_table_list);
+			}
+			list_del(&blob->write_blobs_list);
+		}
+	}
+}
+
+/*
+ * prepare_blob_list_for_write() -
+ *
+ * Prepare the list of blobs to write for writing a WIM containing the specified
+ * image(s) with the specified write flags.
+ *
+ * @wim
+ *	The WIMStruct on whose behalf the write is occurring.
+ *
+ * @image
+ *	Image(s) from the WIM to write; may be WIMLIB_ALL_IMAGES.
+ *
+ * @write_flags
+ *	WIMLIB_WRITE_FLAG_* flags for the write operation:
+ *
+ *	STREAMS_OK:  For writes of all images, assume that all blobs in the blob
+ *	table of @wim and the per-image lists of unhashed blobs should be taken
+ *	as-is, and image metadata should not be searched for references.  This
+ *	does not exclude filtering with APPEND and SKIP_EXTERNAL_WIMS, below.
+ *
+ *	APPEND:  Blobs already present in @wim shall not be returned in
+ *	@blob_list_ret.
+ *
+ *	SKIP_EXTERNAL_WIMS:  Blobs already present in a WIM file, but not @wim,
+ *	shall be returned in neither @blob_list_ret nor @blob_table_list_ret.
+ *
+ * @blob_list_ret
+ *	List of blobs, linked by write_blobs_list, that need to be written will
+ *	be returned here.
+ *
+ *	Note that this function assumes that unhashed blobs will be written; it
+ *	does not take into account that they may become duplicates when actually
+ *	hashed.
+ *
+ * @filter_ctx_ret
+ *	A context for queries of blob filter status with blob_filtered() is
+ *	returned in this location.
+ *
+ * In addition, @will_be_in_output_wim will be set to 1 in all blobs inserted
+ * into @blob_table_list_ret and to 0 in all blobs in the blob table of @wim not
+ * inserted into @blob_table_list_ret.
+ *
+ * Still furthermore, @unique_size will be set to 1 on all blobs in
+ * @blob_list_ret that have unique size among all blobs in @blob_list_ret and
+ * among all blobs in the blob table of @wim that are ineligible for being
+ * written due to filtering.
+ *
+ * Returns 0 on success; nonzero on read error, memory allocation error, or
+ * otherwise.
+ */
+static int
+prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
+			    struct list_head *blob_list_ret,
+			    struct filter_context *filter_ctx_ret)
+{
+	int ret;
+
+	filter_ctx_ret->write_flags = write_flags;
+	filter_ctx_ret->wim = wim;
+
+	ret = prepare_unfiltered_list_of_blobs_in_output_wim(
+				wim,
+				image,
+				write_flags & WIMLIB_WRITE_FLAG_STREAMS_OK,
+				blob_list_ret);
+	if (ret)
+		return ret;
+
+	ret = determine_blob_size_uniquity(blob_list_ret, wim->blob_table,
+					   filter_ctx_ret);
+	if (ret)
+		return ret;
+
+	if (may_filter_blobs(filter_ctx_ret))
+		filter_blob_list_for_write(blob_list_ret, filter_ctx_ret);
+
+	return 0;
+}
+
 /* Return true if the specified blob is located in a WIM resource which can be
  * reused in the output WIM file, without being recompressed.  */
 static bool
@@ -293,7 +623,7 @@ struct write_ctx {
 	union wimlib_progress_info progress;
 	union wimlib_progress_info split_progress;
 	u64 next_progress;
-	struct filter_context *filter_ctx;
+	struct filter_context filter_ctx;
 
 	/* Pointer to the chunk_compressor implementation being used for
 	 * compressing chunks of data, or NULL if chunks are being written
@@ -696,7 +1026,7 @@ write_blob_begin_read(struct blob_descriptor *blob, void *_ctx)
 			/* Duplicate blob detected.  */
 
 			if (new_blob->will_be_in_output_wim ||
-			    blob_filtered(new_blob, ctx->filter_ctx))
+			    blob_filtered(new_blob, &ctx->filter_ctx))
 			{
 				/* The duplicate blob is already being included
 				 * in the output WIM, or it would be filtered
@@ -1140,18 +1470,6 @@ tally_blob_list_stats(struct list_head *blob_list,
 	return 0;
 }
 
-static int
-sum_blob_sizes(struct list_head *blob_list)
-{
-	u64 sum = 0;
-	struct blob_descriptor *blob;
-
-	list_for_each_entry(blob, blob_list, write_blobs_list)
-		sum += blob->size;
-
-	return sum;
-}
-
 /* Find blobs in @blob_list that can be copied to the output WIM in raw form
  * rather than compressed.  Delete these blobs from @blob_list and move them to
  * @raw_copy_blobs.  */
@@ -1465,18 +1783,21 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	struct list_head raw_copy_blobs;
 	int out_ctype;
 	u32 out_chunk_size;
+	u64 num_nonraw_bytes;
 	const struct read_blob_callbacks cbs = {
 		.begin_blob	= write_blob_begin_read,
 		.consume_chunk	= write_blob_process_chunk,
 		.end_blob	= write_blob_end_read,
 		.ctx		= &ctx,
 	};
-	LIST_HEAD(file_blob_list);
-	LIST_HEAD(metadata_blob_list);
-
-	prepare_blob_list_for_write
-
+	LIST_HEAD(blob_list);
 	memset(&ctx, 0, sizeof(ctx));
+
+	ret = prepare_blob_list_for_write(wim, image, write_flags, &blob_list,
+					  &ctx.filter_ctx);
+	if (ret)
+		return ret;
+
 
 	ctx.wim = wim;
 	ctx.out_fd = &wim->out_fd;
@@ -1486,7 +1807,6 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	INIT_LIST_HEAD(&ctx.blobs_being_compressed);
 	INIT_LIST_HEAD(&ctx.blobs_in_solid_resource);
 	ctx.max_part_size = max_part_size;
-	ctx.filter_ctx = filter_ctx;
 	ctx.progress.write_streams.num_threads = num_threads;
 
 	if (write_flags & WIMLIB_WRITE_FLAG_SOLID) {
@@ -1512,13 +1832,11 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	 * measure of similarity of their actual contents.
 	 */
 
-	ret = sort_blob_list_for_write(&metadata_blob_list);
-	if (!ret)
-		ret = tally_blob_list_stats(&metadata_blob_list, &ctx);
-	if (!ret)
-		ret = sort_blob_list_for_write(&file_blob_list);
-	if (!ret)
-		ret = tally_blob_list_stats(&file_blob_list, &ctx);
+	ret = sort_blob_list_for_write(&blob_list);
+	if (ret)
+		return ret;
+
+	ret = tally_blob_list_stats(&blob_list, &ctx);
 	if (ret)
 		return ret;
 
@@ -1526,7 +1844,7 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 			    WIMLIB_WRITE_FLAG_NO_SOLID_SORT))
 		== WIMLIB_WRITE_FLAG_SOLID)
 	{
-		ret = sort_blob_list_for_solid_compression(&file_blob_list);
+		ret = sort_blob_list_for_solid_compression(&blob_list);
 		if (unlikely(ret))
 			WARNING("Failed to sort blobs for solid compression. "
 				"Continuing anyways.");
@@ -1535,58 +1853,42 @@ write_blobs(WIMStruct *wim, int image, int write_flags, unsigned num_threads,
 	/* If needed, set auxiliary information so that we can detect when the
 	 * library has finished using each external file.  */
 	if (unlikely(write_flags & WIMLIB_WRITE_FLAG_SEND_DONE_WITH_FILE_MESSAGES))
-		init_done_with_file_info(&file_blob_list);
+		init_done_with_file_info(&blob_list);
 
-	find_raw_copy_blobs(file_blob_list, write_flags, out_ctype,
-			    out_chunk_size, &raw_copy_blobs);
+	num_nonraw_bytes = find_raw_copy_blobs(&blob_list,
+					       write_flags,
+					       out_ctype,
+					       out_chunk_size,
+					       &raw_copy_blobs);
 
 	/* Copy any compressed resources for which the raw data can be reused
 	 * without decompression.  */
-	ret = write_raw_copy_resources(&raw_copy_blobs, ctx.out_fd,
-				       blob_table_list, &ctx.progress_data);
+	ret = write_raw_copy_resources(&ctx, &raw_copy_blobs);
+	if (ret)
+		goto out_destroy_context;
 
+	if (num_nonraw_bytes == 0)
+		goto out_destroy_context;
+
+	ret = init_compressor(&ctx, out_ctype, out_chunk_size,
+			      num_threads, num_nonraw_bytes);
 	if (ret)
 		goto out_destroy_context;
 
 	ret = call_progress(wim->progfunc, WIMLIB_PROGRESS_MSG_WRITE_STREAMS,
-			    &ctx.progress_data.progress, wim->progctx);
+			    &ctx.progress, wim->progctx);
 	if (ret)
 		goto out_destroy_context;
 
-	if (!list_empty(metadata_blob_list)) {
-		int saved_flags = ctx.write_flags;
-		ctx.write_flags &= ~WIMLIB_WRITE_FLAG_SOLID;
-		ret = init_compressor(&ctx, wim->out_compression_type,
-				      wim->out_chunk_size, num_threads,
-				      sum_blob_sizes(metadata_blob_list));
-		if (ret)
-			goto out_destroy_context;
-		ret = write_blob_list(metadata_blob_list, &cbs, &ctx);
-		if (ret)
-			goto out_destroy_context;
-		ctx.write_flags = saved_flags;
-	}
-
-	if (!list_empty(file_blob_list)) {
-
-		u64 total_size = sum_blob_sizes(file_blob_list);
-
-		ret = init_compressor(&ctx, file_data_ctype,
-				      file_data_chunk_size, num_threads,
-				      total_size);
-		if (ret)
-			goto out_destroy_context;
-
-		if (ctx.write_flags & WIMLIB_WRITE_FLAG_SOLID) {
-			ret = begin_write_resource(&ctx, total_size);
-			if (ret)
-				goto out_destroy_context;
-		}
-
-		ret = write_blob_list(file_blob_list, &cbs, &ctx);
+	if (ctx.write_flags & WIMLIB_WRITE_FLAG_SOLID) {
+		ret = begin_write_resource(&ctx, num_nonraw_bytes);
 		if (ret)
 			goto out_destroy_context;
 	}
+
+	ret = write_blob_list(&blob_list, &cbs, &ctx);
+	if (ret)
+		goto out_destroy_context;
 
 out_destroy_context:
 	FREE(ctx.chunk_csizes);
@@ -1613,7 +1915,7 @@ write_uncompressed_resource(const void *buf,
 		struct pwm_blob_hdr blob_hdr;
 
 		blob_hdr.magic = cpu_to_le64(PWM_BLOB_MAGIC);
-		blob_hdr.uncompressed_size = cpu_to_le64(blob->size);
+		blob_hdr.uncompressed_size = cpu_to_le64(buf_size);
 		sha1_buffer(buf, buf_size, blob_hdr.hash);
 		blob_hdr.flags = cpu_to_le32(flags);
 
@@ -1638,335 +1940,6 @@ err:
 	return ret;
 }
 
-struct blob_size_table {
-	struct hlist_head *array;
-	size_t num_entries;
-	size_t capacity;
-};
-
-static int
-init_blob_size_table(struct blob_size_table *tab, size_t capacity)
-{
-	tab->array = CALLOC(capacity, sizeof(tab->array[0]));
-	if (tab->array == NULL)
-		return WIMLIB_ERR_NOMEM;
-	tab->num_entries = 0;
-	tab->capacity = capacity;
-	return 0;
-}
-
-static void
-destroy_blob_size_table(struct blob_size_table *tab)
-{
-	FREE(tab->array);
-}
-
-static int
-blob_size_table_insert(struct blob_descriptor *blob, void *_tab)
-{
-	struct blob_size_table *tab = _tab;
-	size_t pos;
-	struct blob_descriptor *same_size_blob;
-
-	if (blob->is_metadata)
-		return 0;
-
-	pos = hash_u64(blob->size) % tab->capacity;
-	blob->unique_size = 1;
-	hlist_for_each_entry(same_size_blob, &tab->array[pos], hash_list_2) {
-		if (same_size_blob->size == blob->size) {
-			blob->unique_size = 0;
-			same_size_blob->unique_size = 0;
-			break;
-		}
-	}
-
-	hlist_add_head(&blob->hash_list_2, &tab->array[pos]);
-	tab->num_entries++;
-	return 0;
-}
-
-struct find_blobs_ctx {
-	WIMStruct *wim;
-	int write_flags;
-	struct list_head blob_list;
-	struct blob_size_table blob_size_tab;
-};
-
-static void
-reference_blob_for_write(struct blob_descriptor *blob,
-			 struct list_head *blob_list, u32 nref)
-{
-	if (!blob->will_be_in_output_wim) {
-		blob->out_refcnt = 0;
-		list_add_tail(&blob->write_blobs_list, blob_list);
-		blob->will_be_in_output_wim = 1;
-	}
-	blob->out_refcnt += nref;
-}
-
-static int
-fully_reference_blob_for_write(struct blob_descriptor *blob, void *_blob_list)
-{
-	struct list_head *blob_list = _blob_list;
-	blob->will_be_in_output_wim = 0;
-	reference_blob_for_write(blob, blob_list, blob->refcnt);
-	return 0;
-}
-
-static int
-inode_find_blobs_to_reference(const struct wim_inode *inode,
-			      const struct blob_table *table,
-			      struct list_head *blob_list)
-{
-	wimlib_assert(inode->i_nlink > 0);
-
-	for (unsigned i = 0; i < inode->i_num_streams; i++) {
-		struct blob_descriptor *blob;
-		const u8 *hash;
-
-		blob = stream_blob(&inode->i_streams[i], table);
-		if (blob) {
-			reference_blob_for_write(blob, blob_list, inode->i_nlink);
-		} else {
-			hash = stream_hash(&inode->i_streams[i]);
-			if (!is_zero_hash(hash))
-				return blob_not_found_error(inode, hash);
-		}
-	}
-	return 0;
-}
-
-static int
-do_blob_set_not_in_output_wim(struct blob_descriptor *blob, void *_ignore)
-{
-	blob->will_be_in_output_wim = 0;
-	return 0;
-}
-
-static int
-image_find_blobs_to_reference(WIMStruct *wim)
-{
-	struct wim_image_metadata *imd;
-	struct wim_inode *inode;
-	struct blob_descriptor *blob;
-	struct list_head *blob_list;
-	int ret;
-
-	imd = wim_get_current_image_metadata(wim);
-
-	image_for_each_unhashed_blob(blob, imd)
-		blob->will_be_in_output_wim = 0;
-
-	blob_list = wim->private;
-	image_for_each_inode(inode, imd) {
-		ret = inode_find_blobs_to_reference(inode,
-						    wim->blob_table,
-						    blob_list);
-		if (ret)
-			return ret;
-	}
-	return 0;
-}
-
-static int
-prepare_unfiltered_list_of_blobs_in_output_wim(WIMStruct *wim,
-					       int image,
-					       int blobs_ok,
-					       struct list_head *blob_list_ret)
-{
-	int ret;
-	int i;
-	struct wim_image_metadata *imd;
-	struct blob_descriptor *blob;
-
-	INIT_LIST_HEAD(blob_list_ret);
-
-	if (blobs_ok && (image == WIMLIB_ALL_IMAGES ||
-			 (image == 1 && wim->hdr.image_count == 1)))
-	{
-		/* Fast case:  Assume that all blobs are being written and that
-		 * the reference counts are correct.  */
-		for_blob_in_table(wim->blob_table,
-				  fully_reference_blob_for_write,
-				  blob_list_ret);
-		for (i = 0; i < wim->hdr.image_count; i++) {
-			imd = wim->image_metadata[i];
-			image_for_each_unhashed_blob(blob, imd)
-				fully_reference_blob_for_write(blob, blob_list_ret);
-		}
-	} else {
-		/* Slow case:  Walk through the images being written and
-		 * determine the blobs referenced.  */
-		for_blob_in_table(wim->blob_table,
-				  do_blob_set_not_in_output_wim, NULL);
-		wim->private = blob_list_ret;
-		ret = for_image(wim, image, image_find_blobs_to_reference);
-		if (ret)
-			return ret;
-	}
-
-	/* Reference metadata resources  */
-	for (i = (image == WIMLIB_ALL_IMAGES ? 1 : image);
-	     i <= (image == WIMLIB_ALL_IMAGES ? wim->hdr.image_count : image);
-	     i++)
-	{
-		imd = wim->image_metadata[i];
-		blob = imd->metadata_blob;
-		blob->will_be_in_output_wim = 0;
-		reference_blob_for_write(blob, blob_list_ret, 1);
-	}
-
-	return 0;
-}
-
-struct insert_other_if_hard_filtered_ctx {
-	struct blob_size_table *tab;
-	struct filter_context *filter_ctx;
-};
-
-static int
-insert_other_if_hard_filtered(struct blob_descriptor *blob, void *_ctx)
-{
-	struct insert_other_if_hard_filtered_ctx *ctx = _ctx;
-
-	if (!blob->will_be_in_output_wim &&
-	    blob_hard_filtered(blob, ctx->filter_ctx))
-		blob_size_table_insert(blob, ctx->tab);
-	return 0;
-}
-
-static int
-determine_blob_size_uniquity(struct list_head *blob_list,
-			     struct blob_table *table,
-			     struct filter_context *filter_ctx)
-{
-	int ret;
-	struct blob_size_table tab;
-	struct blob_descriptor *blob;
-
-	ret = init_blob_size_table(&tab, 9001);
-	if (ret)
-		return ret;
-
-	if (may_hard_filter_blobs(filter_ctx)) {
-		struct insert_other_if_hard_filtered_ctx ctx = {
-			.tab = &tab,
-			.filter_ctx = filter_ctx,
-		};
-		for_blob_in_table(table, insert_other_if_hard_filtered, &ctx);
-	}
-
-	list_for_each_entry(blob, blob_list, write_blobs_list)
-		blob_size_table_insert(blob, &tab);
-
-	destroy_blob_size_table(&tab);
-	return 0;
-}
-
-static void
-filter_blob_list_for_write(struct list_head *blob_list,
-			   struct filter_context *filter_ctx)
-{
-	struct blob_descriptor *blob, *tmp;
-
-	list_for_each_entry_safe(blob, tmp, blob_list, write_blobs_list) {
-		int status = blob_filtered(blob, filter_ctx);
-
-		if (status == 0) {
-			/* Not filtered.  */
-			continue;
-		} else {
-			if (status > 0) {
-				/* Soft filtered.  */
-			} else {
-				/* Hard filtered.  */
-				blob->will_be_in_output_wim = 0;
-				list_del(&blob->blob_table_list);
-			}
-			list_del(&blob->write_blobs_list);
-		}
-	}
-}
-
-/*
- * prepare_blob_list_for_write() -
- *
- * Prepare the list of blobs to write for writing a WIM containing the specified
- * image(s) with the specified write flags.
- *
- * @wim
- *	The WIMStruct on whose behalf the write is occurring.
- *
- * @image
- *	Image(s) from the WIM to write; may be WIMLIB_ALL_IMAGES.
- *
- * @write_flags
- *	WIMLIB_WRITE_FLAG_* flags for the write operation:
- *
- *	STREAMS_OK:  For writes of all images, assume that all blobs in the blob
- *	table of @wim and the per-image lists of unhashed blobs should be taken
- *	as-is, and image metadata should not be searched for references.  This
- *	does not exclude filtering with APPEND and SKIP_EXTERNAL_WIMS, below.
- *
- *	APPEND:  Blobs already present in @wim shall not be returned in
- *	@blob_list_ret.
- *
- *	SKIP_EXTERNAL_WIMS:  Blobs already present in a WIM file, but not @wim,
- *	shall be returned in neither @blob_list_ret nor @blob_table_list_ret.
- *
- * @blob_list_ret
- *	List of blobs, linked by write_blobs_list, that need to be written will
- *	be returned here.
- *
- *	Note that this function assumes that unhashed blobs will be written; it
- *	does not take into account that they may become duplicates when actually
- *	hashed.
- *
- * @filter_ctx_ret
- *	A context for queries of blob filter status with blob_filtered() is
- *	returned in this location.
- *
- * In addition, @will_be_in_output_wim will be set to 1 in all blobs inserted
- * into @blob_table_list_ret and to 0 in all blobs in the blob table of @wim not
- * inserted into @blob_table_list_ret.
- *
- * Still furthermore, @unique_size will be set to 1 on all blobs in
- * @blob_list_ret that have unique size among all blobs in @blob_list_ret and
- * among all blobs in the blob table of @wim that are ineligible for being
- * written due to filtering.
- *
- * Returns 0 on success; nonzero on read error, memory allocation error, or
- * otherwise.
- */
-static int
-prepare_blob_list_for_write(WIMStruct *wim, int image, int write_flags,
-			    struct list_head *blob_list_ret,
-			    struct filter_context *filter_ctx_ret)
-{
-	int ret;
-
-	filter_ctx_ret->write_flags = write_flags;
-	filter_ctx_ret->wim = wim;
-
-	ret = prepare_unfiltered_list_of_blobs_in_output_wim(
-				wim,
-				image,
-				write_flags & WIMLIB_WRITE_FLAG_STREAMS_OK,
-				blob_list_ret);
-	if (ret)
-		return ret;
-
-	ret = determine_blob_size_uniquity(blob_list_ret, wim->blob_table,
-					   filter_ctx_ret);
-	if (ret)
-		return ret;
-
-	if (may_filter_blobs(filter_ctx_ret))
-		filter_blob_list_for_write(blob_list_ret, filter_ctx_ret);
-
-	return 0;
-}
 
 /*static int*/
 /*prepare_metadata_resources(WIMStruct *wim, int image, int write_flags,*/
@@ -2112,7 +2085,7 @@ write_blob_table(WIMStruct *wim, int write_flags,
 					       &wim->out_fd,
 					       wim->out_hdr.part_number,
 					       &wim->out_hdr.blob_table_reshdr,
-					       write_flags_to_resource_flags(write_flags));
+					       write_flags);
 }
 
 /*
@@ -2126,14 +2099,11 @@ static int
 finish_write(WIMStruct *wim, int image, int write_flags,
 	     struct list_head *blob_table_list)
 {
-	int write_flags;
 	off_t old_blob_table_end = 0;
 	struct integrity_table *old_integrity_table = NULL;
 	off_t new_blob_table_end;
 	u64 xml_totalbytes;
 	int ret;
-
-	write_flags = write_flags_to_resource_flags(write_flags);
 
 	/* In the WIM header, there is room for the resource entry for a
 	 * metadata resource labeled as the "boot metadata".  This entry should
@@ -2394,7 +2364,6 @@ write_wim(WIMStruct *wim, const void *path_or_fd, int image,
 	  int write_flags, unsigned num_threads, u64 part_size)
 {
 	int ret;
-	int write_flags;
 	struct list_head blob_list;
 	struct filter_context filter_ctx;
 	struct split_context ctx;
