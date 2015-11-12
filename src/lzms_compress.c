@@ -28,10 +28,13 @@
 #include <limits.h>
 #include <string.h>
 
+#define mf_pos_t u32
+#define MF_SUFFIX
+
+#include "wimlib/bt_matchfinder.h"
 #include "wimlib/compress_common.h"
 #include "wimlib/compressor_ops.h"
 #include "wimlib/error.h"
-#include "wimlib/lcpit_matchfinder.h"
 #include "wimlib/lz_extend.h"
 #include "wimlib/lz_hash.h"
 #include "wimlib/lzms_common.h"
@@ -257,9 +260,6 @@ struct lzms_optimum_node {
 /* The main compressor structure  */
 struct lzms_compressor {
 
-	/* The matchfinder for LZ matches  */
-	struct lcpit_matchfinder mf;
-
 	/* The preprocessed buffer of data being compressed  */
 	u8 *in_buffer;
 
@@ -290,6 +290,10 @@ struct lzms_compressor {
 	/* If true, the compressor need not preserve the input buffer if it
 	 * compresses the data successfully.  */
 	bool destructive;
+
+	u32 max_search_depth;
+	u32 nice_match_len;
+	u32 next_lz_hashes[2];
 
 	/* 'last_target_usages' is a large array that is only needed for
 	 * preprocessing, so it is in union with fields that don't need to be
@@ -376,6 +380,9 @@ struct lzms_compressor {
 
 	/* slots [427, 799); 16 <= num_extra_bits  */
 	u16 offset_slot_tab_3[((LZMS_MAX_MATCH_OFFSET + 1) - 0xe4a5) >> 16];
+
+	/* The matchfinder for LZ matches  */
+	struct bt_matchfinder mf;
 };
 
 /******************************************************************************
@@ -1235,29 +1242,6 @@ lzms_extend_delta_match(const u8 *in_next, const u8 *matchptr,
 	return len;
 }
 
-static void
-lzms_delta_matchfinder_skip_bytes(struct lzms_compressor *c,
-				  const u8 *in_next, u32 count)
-{
-	u32 pos = in_next - c->in_buffer;
-	if (unlikely(c->in_nbytes - (pos + count) <= NBYTES_HASHED_FOR_DELTA + 1))
-		return;
-	do {
-		/* Update the hash table for each power.  */
-		for (u32 power = 0; power < NUM_POWERS_TO_CONSIDER; power++) {
-			const u32 span = (u32)1 << power;
-			if (unlikely(pos < span))
-				continue;
-			const u32 next_hash = lzms_delta_hash(in_next + 1, pos + 1, span);
-			const u32 hash = c->next_delta_hashes[power];
-			c->delta_hash_table[hash] =
-				(power << DELTA_SOURCE_POWER_SHIFT) | pos;
-			c->next_delta_hashes[power] = next_hash;
-			prefetchw(&c->delta_hash_table[next_hash]);
-		}
-	} while (in_next++, pos++, --count);
-}
-
 /*
  * Skip the next @count bytes (don't search for matches at them).  @in_next
  * points to the first byte to skip.  The return value is @in_next + count.
@@ -1265,10 +1249,36 @@ lzms_delta_matchfinder_skip_bytes(struct lzms_compressor *c,
 static const u8 *
 lzms_skip_bytes(struct lzms_compressor *c, u32 count, const u8 *in_next)
 {
-	lcpit_matchfinder_skip_bytes(&c->mf, count);
-	if (c->use_delta_matches)
-		lzms_delta_matchfinder_skip_bytes(c, in_next, count);
-	return in_next + count;
+	u32 pos = in_next - c->in_buffer;
+	if (unlikely(c->in_nbytes - (pos + count) <= NBYTES_HASHED_FOR_DELTA + 1))
+		return in_next + count;
+	do {
+		/* Update the hash table for each power.  */
+		if (c->use_delta_matches) {
+			for (u32 power = 0; power < NUM_POWERS_TO_CONSIDER; power++) {
+				const u32 span = (u32)1 << power;
+				if (unlikely(pos < span))
+					continue;
+				const u32 next_hash = lzms_delta_hash(in_next + 1, pos + 1, span);
+				const u32 hash = c->next_delta_hashes[power];
+				c->delta_hash_table[hash] =
+					(power << DELTA_SOURCE_POWER_SHIFT) | pos;
+				c->next_delta_hashes[power] = next_hash;
+				prefetchw(&c->delta_hash_table[next_hash]);
+			}
+		}
+
+		bt_matchfinder_skip_position(&c->mf,
+					     c->in_buffer,
+					     pos,
+					     c->in_nbytes - pos,
+					     min(c->nice_match_len, c->in_nbytes - pos),
+					     c->max_search_depth,
+					     c->next_lz_hashes);
+
+	} while (in_next++, pos++, --count);
+
+	return in_next;
 }
 
 /******************************************************************************
@@ -1349,7 +1359,7 @@ begin:
 				const u32 rep_len = lz_extend(in_next, matchptr, 2, in_end - in_next);
 
 				/* Early out for long repeat offset LZ match */
-				if (rep_len >= c->mf.nice_match_len) {
+				if (rep_len >= c->nice_match_len) {
 
 					in_next = lzms_skip_bytes(c, rep_len, in_next);
 
@@ -1415,7 +1425,7 @@ begin:
 					const u32 rep0_len = lz_extend(in_next + rep_len + 1,
 								       matchptr + rep_len + 1,
 								       2,
-								       min(c->mf.nice_match_len,
+								       min(c->nice_match_len,
 									   in_end - (in_next + rep_len + 1)));
 
 					unsigned main_state = cur_node->state.main_state;
@@ -1502,7 +1512,7 @@ begin:
 									    span);
 
 				/* Early out for long repeat offset delta match */
-				if (rep_len >= c->mf.nice_match_len) {
+				if (rep_len >= c->nice_match_len) {
 
 					in_next = lzms_skip_bytes(c, rep_len, in_next);
 
@@ -1560,22 +1570,26 @@ begin:
 		}
 
 		/* Explicit offset LZ matches  */
-		num_matches = lcpit_matchfinder_get_matches(&c->mf, c->matches);
+
+		u32 best_len;
+		struct lz_match *lz_matchptr =
+			(in_end - in_next < 5) ?  c->matches :
+				bt_matchfinder_get_matches(&c->mf,
+							   c->in_buffer,
+							   in_next - c->in_buffer,
+							   in_end - in_next,
+							   min(c->nice_match_len, in_end - in_next),
+							   c->max_search_depth,
+							   c->next_lz_hashes,
+							   &best_len,
+							   c->matches);
+		num_matches = lz_matchptr - c->matches;
 		if (num_matches) {
 
-			u32 best_len = c->matches[0].length;
-
 			/* Early out for long explicit offset LZ match  */
-			if (best_len >= c->mf.nice_match_len) {
+			if (best_len >= c->nice_match_len) {
 
-				const u32 offset = c->matches[0].offset;
-
-				/* Extend the match as far as possible.
-				 * This is necessary because the LCP-interval
-				 * tree matchfinder only reports up to
-				 * nice_match_len bytes.  */
-				best_len = lz_extend(in_next, in_next - offset,
-						     best_len, in_end - in_next);
+				const u32 offset = c->matches[num_matches - 1].offset;
 
 				in_next = lzms_skip_bytes(c, best_len - 1, in_next + 1);
 
@@ -1606,12 +1620,12 @@ begin:
 							c->probs.lz);
 
 			if (c->try_lzmatch_lit_lzrep0 &&
-			    likely(in_end - (in_next + c->matches[0].length) >= 3))
+			    likely(in_end - (in_next + best_len) >= 3))
 			{
 				/* try LZ-match + lit + LZ-rep0  */
 
 				u32 l = 2;
-				u32 i = num_matches - 1;
+				u32 i = 0;
 				do {
 					const u32 len = c->matches[i].length;
 					const u32 offset = c->matches[i].offset;
@@ -1637,7 +1651,7 @@ begin:
 					const u32 rep0_len = lz_extend(in_next + len + 1,
 								       matchptr + len + 1,
 								       2,
-								       min(c->mf.nice_match_len,
+								       min(c->nice_match_len,
 									   in_end - (in_next + len + 1)));
 
 					unsigned main_state = cur_node->state.main_state;
@@ -1687,10 +1701,10 @@ begin:
 						};
 						(cur_node + total_len)->num_extra_items = 2;
 					}
-				} while (i--);
+				} while (++i != num_matches);
 			} else {
 				u32 l = 2;
-				u32 i = num_matches - 1;
+				u32 i = 0;
 				do {
 					u32 position_cost = base_cost +
 							    lzms_lz_offset_cost(c, c->matches[i].offset);
@@ -1706,7 +1720,7 @@ begin:
 							(cur_node + l)->num_extra_items = 0;
 						}
 					} while (++l <= c->matches[i].length);
-				} while (i--);
+				} while (++i != num_matches);
 			}
 		}
 
@@ -1774,7 +1788,7 @@ begin:
 						   (pair + LZMS_NUM_DELTA_REPS - 1);
 
 				/* Early out for long explicit offset delta match  */
-				if (len >= c->mf.nice_match_len) {
+				if (len >= c->nice_match_len) {
 
 					in_next = lzms_skip_bytes(c, len - 1, in_next + 1);
 
@@ -1847,7 +1861,7 @@ begin:
 							       in_next + 1 - offset,
 							       2,
 							       min(in_end - (in_next + 1),
-								   c->mf.nice_match_len));
+								   c->nice_match_len));
 
 				unsigned main_state = cur_node->state.main_state;
 
@@ -2115,7 +2129,7 @@ lzms_get_needed_memory(size_t max_bufsize, unsigned compression_level,
 		size += max_bufsize; /* in_buffer */
 
 	/* mf */
-	size += lcpit_matchfinder_get_needed_memory(max_bufsize);
+	size += bt_matchfinder_size(max_bufsize);
 
 	return size;
 }
@@ -2125,12 +2139,12 @@ lzms_create_compressor(size_t max_bufsize, unsigned compression_level,
 		       bool destructive, void **c_ret)
 {
 	struct lzms_compressor *c;
-	u32 nice_match_len;
 
 	if (max_bufsize > LZMS_MAX_BUFFER_SIZE)
 		return WIMLIB_ERR_INVALID_PARAM;
 
-	c = ALIGNED_MALLOC(sizeof(struct lzms_compressor), 64);
+	c = ALIGNED_MALLOC(sizeof(struct lzms_compressor) +
+			   bt_matchfinder_size(max_bufsize), 64);
 	if (!c)
 		goto oom0;
 
@@ -2139,8 +2153,8 @@ lzms_create_compressor(size_t max_bufsize, unsigned compression_level,
 	/* Scale nice_match_len with the compression level.  But to allow an
 	 * optimization for length cost calculations, don't allow nice_match_len
 	 * to exceed MAX_FAST_LENGTH.  */
-	nice_match_len = min(((u64)compression_level * 63) / 50, MAX_FAST_LENGTH);
-
+	c->max_search_depth = 32;
+	c->nice_match_len = min(((u64)compression_level * 63) / 50, MAX_FAST_LENGTH);
 	c->use_delta_matches = (compression_level >= 35);
 	c->try_lzmatch_lit_lzrep0 = (compression_level >= 45);
 	c->try_lit_lzrep0 = (compression_level >= 60);
@@ -2152,18 +2166,12 @@ lzms_create_compressor(size_t max_bufsize, unsigned compression_level,
 			goto oom1;
 	}
 
-	if (!lcpit_matchfinder_init(&c->mf, max_bufsize, 2, nice_match_len))
-		goto oom2;
-
 	lzms_init_fast_length_slot_tab(c);
 	lzms_init_offset_slot_tabs(c);
 
 	*c_ret = c;
 	return 0;
 
-oom2:
-	if (!c->destructive)
-		FREE(c->in_buffer);
 oom1:
 	ALIGNED_FREE(c);
 oom0:
@@ -2190,7 +2198,9 @@ lzms_compress(const void *restrict in, size_t in_nbytes,
 	lzms_x86_filter(c->in_buffer, in_nbytes, c->last_target_usages, false);
 
 	/* Prepare the matchfinders.  */
-	lcpit_matchfinder_load_buffer(&c->mf, c->in_buffer, c->in_nbytes);
+	bt_matchfinder_init(&c->mf);
+	c->next_lz_hashes[0] = 0;
+	c->next_lz_hashes[1] = 0;
 	if (c->use_delta_matches)
 		lzms_init_delta_matchfinder(c);
 
@@ -2217,7 +2227,6 @@ lzms_free_compressor(void *_c)
 
 	if (!c->destructive)
 		FREE(c->in_buffer);
-	lcpit_matchfinder_destroy(&c->mf);
 	ALIGNED_FREE(c);
 }
 
