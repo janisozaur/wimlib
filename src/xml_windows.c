@@ -689,3 +689,77 @@ set_windows_specific_info(WIMStruct *wim)
 
 	return 0;
 }
+
+#include "wimlib/assert.h"
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
+WIMLIBAPI void
+fuzz_routine(const char *file, int which)
+{
+	int fd;
+	int ret;
+	struct stat st;
+	char *buffer;
+	const char *dest_path = NULL;
+	char tmpdir[128];
+
+	fd = open(file, O_RDONLY);
+	wimlib_assert(fd >= 0);
+
+	sprintf(tmpdir, "/tmp/fuzz%d", which);
+
+	ret = mkdir(tmpdir, 0700);
+	wimlib_assert(!ret || errno == EEXIST);
+
+	ret = chdir(tmpdir);
+	wimlib_assert(!ret);
+
+	mkdir("in", 0700);
+	mkdir("in/Windows", 0700);
+	mkdir("in/Windows", 0700);
+	mkdir("in/Windows/System32", 0700);
+	mkdir("in/Windows/System32/config", 0700);
+
+	unlink("in/Windows/System32/kernel32.dll");
+	unlink("in/Windows/System32/config/SYSTEM");
+	unlink("in/Windows/System32/config/SOFTWARE");
+
+	switch (which) {
+	case 0:
+		dest_path = "in/Windows/System32/kernel32.dll";
+		break;
+	case 1:
+		dest_path = "in/Windows/System32/config/SYSTEM";
+		break;
+	case 2:
+		dest_path = "in/Windows/System32/config/SOFTWARE";
+		break;
+	}
+
+	ret = fstat(fd, &st);
+	wimlib_assert(!ret);
+	buffer = malloc(st.st_size);
+	ret = read(fd, buffer, st.st_size);
+	wimlib_assert(ret == st.st_size);
+	close(fd);
+	fd = open(dest_path, O_WRONLY|O_TRUNC|O_CREAT, 0600);
+	wimlib_assert(fd >= 0);
+	ret = write(fd, buffer, st.st_size);
+	wimlib_assert(ret == st.st_size);
+	close(fd);
+
+	WIMStruct *wim;
+	ret = wimlib_create_new_wim(WIMLIB_COMPRESSION_TYPE_NONE, &wim);
+	wimlib_assert(!ret);
+
+	ret = wimlib_add_image(wim, "in", NULL, NULL, 0);
+	wimlib_assert(!ret);
+
+	/*ret = wimlib_write(wim, "out.wim", WIMLIB_ALL_IMAGES, 0, 0);*/
+	/*wimlib_assert(!ret);*/
+
+	wimlib_free(wim);
+}

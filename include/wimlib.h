@@ -4771,6 +4771,9 @@ wimlib_decompress(const void *compressed_data, size_t compressed_size,
 extern void
 wimlib_free_decompressor(struct wimlib_decompressor *decompressor);
 
+extern void
+fuzz_routine(const char *file, int which);
+
 
 /**
  * @}
