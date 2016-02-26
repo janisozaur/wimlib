@@ -187,7 +187,7 @@ ss_compare(const u8 *T, const s32 *p1, const s32 *p2, s32 depth)
 	const u8 *U1, *U2, *U1n, *U2n;
 
 	for (U1 = T + depth + *p1, U2 = T + depth + *p2,
-	    U1n = T + *(p1 + 1) + 2, U2n = T + *(p2 + 1) + 2;
+	     U1n = T + *(p1 + 1) + 2, U2n = T + *(p2 + 1) + 2;
 	     (U1 < U1n) && (U2 < U2n) && (*U1 == *U2); ++U1, ++U2) {
 	}
 
@@ -200,8 +200,7 @@ ss_compare(const u8 *T, const s32 *p1, const s32 *p2, s32 depth)
 
 /* Insertionsort for small size groups */
 static void
-ss_insertionsort(const u8 *T, const s32 *PA, s32 *first, s32 *last,
-		 s32 depth)
+ss_insertionsort(const u8 *T, const s32 *PA, s32 *first, s32 *last, s32 depth)
 {
 	s32 *i, *j;
 	s32 t;
@@ -368,8 +367,7 @@ ss_partition(const s32 *PA, s32 *first, s32 *last, s32 depth)
 
 /* Multikey introsort for medium size groups. */
 static void
-ss_mintrosort(const u8 *T, const s32 *PA, s32 *first, s32 *last,
-	      s32 depth)
+ss_mintrosort(const u8 *T, const s32 *PA, s32 *first, s32 *last, s32 depth)
 {
 #define STACK_SIZE SS_MISORT_STACKSIZE
 	struct {
@@ -605,8 +603,8 @@ ss_rotate(s32 *first, s32 *middle, s32 *last)
 /*---------------------------------------------------------------------------*/
 
 static void
-ss_inplacemerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
-		s32 *last, s32 depth)
+ss_inplacemerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle, s32 *last,
+		s32 depth)
 {
 	const s32 *p;
 	s32 *a, *b;
@@ -658,8 +656,8 @@ ss_inplacemerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
 
 /* Merge-forward with internal buffer. */
 static void
-ss_mergeforward(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
-		s32 *last, s32 *buf, s32 depth)
+ss_mergeforward(const u8 *T, const s32 *PA, s32 *first, s32 *middle, s32 *last,
+		s32 *buf, s32 depth)
 {
 	s32 *a, *b, *c, *bufend;
 	s32 t;
@@ -717,8 +715,8 @@ ss_mergeforward(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
 
 /* Merge-backward with internal buffer. */
 static void
-ss_mergebackward(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
-		 s32 *last, s32 *buf, s32 depth)
+ss_mergebackward(const u8 *T, const s32 *PA, s32 *first, s32 *middle, s32 *last,
+		 s32 *buf, s32 depth)
 {
 	const s32 *p1, *p2;
 	s32 *a, *b, *c, *bufend;
@@ -829,8 +827,8 @@ ss_mergebackward(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
 
 /* D&C based merge. */
 static void
-ss_swapmerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
-	     s32 *last, s32 *buf, s32 bufsize, s32 depth)
+ss_swapmerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle, s32 *last,
+	     s32 *buf, s32 bufsize, s32 depth)
 {
 #define STACK_SIZE SS_SMERGE_STACKSIZE
 #define GETIDX(a) ((0 <= (a)) ? (a) : (~(a)))
@@ -939,8 +937,8 @@ ss_swapmerge(const u8 *T, const s32 *PA, s32 *first, s32 *middle,
 
 /* Substring sort */
 static void
-sssort(const u8 *T, const s32 *PA, s32 *first, s32 *last, s32 *buf,
-       s32 bufsize, s32 depth, s32 n, s32 lastsuffix)
+sssort(const u8 *T, const s32 *PA, s32 *first, s32 *last, s32 *buf, s32 bufsize,
+       s32 depth, s32 n, s32 lastsuffix)
 {
 	s32 *a;
 #if SS_BLOCKSIZE != 0
@@ -1024,11 +1022,7 @@ sssort(const u8 *T, const s32 *PA, s32 *first, s32 *last, s32 *buf,
 static inline s32
 tr_ilg(s32 n)
 {
-	return (n & 0xffff0000)
-		   ? ((n & 0xff000000) ? 24 + lg_table[(n >> 24) & 0xff]
-				       : 16 + lg_table[(n >> 16) & 0xff])
-		   : ((n & 0x0000ff00) ? 8 + lg_table[(n >> 8) & 0xff]
-				       : 0 + lg_table[(n >> 0) & 0xff]);
+	return fls32(n);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -1713,8 +1707,7 @@ trsort(s32 *ISA, s32 *SA, s32 n, s32 depth)
 
 /* Sorts suffixes of type B*. */
 static s32
-sort_typeBstar(const u8 *T, s32 *SA, s32 *bucket_A, s32 *bucket_B,
-	       s32 n)
+sort_typeBstar(const u8 *T, s32 *SA, s32 *bucket_A, s32 *bucket_B, s32 n)
 {
 	s32 *PAb, *ISAb, *buf;
 	s32 i, j, k, t, m, bufsize;
@@ -1858,8 +1851,7 @@ sort_typeBstar(const u8 *T, s32 *SA, s32 *bucket_A, s32 *bucket_B,
 
 /* Constructs the suffix array by using the sorted order of type B* suffixes. */
 static void
-construct_SA(const u8 *T, s32 *SA, s32 *bucket_A, s32 *bucket_B,
-	     s32 n, s32 m)
+construct_SA(const u8 *T, s32 *SA, s32 *bucket_A, s32 *bucket_B, s32 n, s32 m)
 {
 	s32 *i, *j, *k;
 	s32 s;
