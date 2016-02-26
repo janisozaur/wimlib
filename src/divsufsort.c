@@ -164,9 +164,8 @@ ss_isqrt(int x)
 {
 	int y, e;
 
-	if (x >= (SS_BLOCKSIZE * SS_BLOCKSIZE)) {
+	if (x >= (SS_BLOCKSIZE * SS_BLOCKSIZE))
 		return SS_BLOCKSIZE;
-	}
 	e = (x & 0xffff0000)
 		? ((x & 0xff000000) ? 24 + lg_table[(x >> 24) & 0xff]
 				    : 16 + lg_table[(x >> 16) & 0xff])
@@ -175,9 +174,8 @@ ss_isqrt(int x)
 
 	if (e >= 16) {
 		y = sqq_table[x >> ((e - 6) - (e & 1))] << ((e >> 1) - 7);
-		if (e >= 24) {
+		if (e >= 24)
 			y = (y + 1 + x / y) >> 1;
-		}
 		y = (y + 1 + x / y) >> 1;
 	} else if (e >= 8) {
 		y = (sqq_table[x >> ((e - 6) - (e & 1))] >> (7 - (e >> 1))) + 1;
@@ -225,13 +223,11 @@ ss_insertionsort(const unsigned char *T, const int *PA, int *first, int *last,
 			do {
 				*(j - 1) = *j;
 			} while ((++j < last) && (*j < 0));
-			if (last <= j) {
+			if (last <= j)
 				break;
-			}
 		}
-		if (r == 0) {
+		if (r == 0)
 			*j = ~*j;
-		}
 		*(j - 1) = t;
 	}
 }
@@ -256,9 +252,8 @@ ss_fixdown(const unsigned char *Td, const int *PA, int *SA, int i, int size)
 			k = j;
 			d = e;
 		}
-		if (d <= c) {
+		if (d <= c)
 			break;
-		}
 	}
 	SA[i] = v;
 }
@@ -273,14 +268,12 @@ ss_heapsort(const unsigned char *Td, const int *PA, int *SA, int size)
 	m = size;
 	if ((size % 2) == 0) {
 		m--;
-		if (Td[PA[SA[m / 2]]] < Td[PA[SA[m]]]) {
+		if (Td[PA[SA[m / 2]]] < Td[PA[SA[m]]])
 			SWAP(SA[m], SA[m / 2]);
-		}
 	}
 
-	for (i = m / 2 - 1; 0 <= i; --i) {
+	for (i = m / 2 - 1; 0 <= i; --i)
 		ss_fixdown(Td, PA, SA, i, m);
-	}
 	if ((size % 2) == 0) {
 		SWAP(SA[0], SA[m]);
 		ss_fixdown(Td, PA, SA, 0, m);
@@ -298,15 +291,12 @@ ss_heapsort(const unsigned char *Td, const int *PA, int *SA, int size)
 static inline int *
 ss_median3(const unsigned char *Td, const int *PA, int *v1, int *v2, int *v3)
 {
-	if (Td[PA[*v1]] > Td[PA[*v2]]) {
+	if (Td[PA[*v1]] > Td[PA[*v2]])
 		SWAP(v1, v2);
-	}
 	if (Td[PA[*v2]] > Td[PA[*v3]]) {
-		if (Td[PA[*v1]] > Td[PA[*v3]]) {
+		if (Td[PA[*v1]] > Td[PA[*v3]])
 			return v1;
-		} else {
-			return v3;
-		}
+		return v3;
 	}
 	return v2;
 }
@@ -316,26 +306,22 @@ static inline int *
 ss_median5(const unsigned char *Td, const int *PA, int *v1, int *v2, int *v3,
 	   int *v4, int *v5)
 {
-	if (Td[PA[*v2]] > Td[PA[*v3]]) {
+	if (Td[PA[*v2]] > Td[PA[*v3]])
 		SWAP(v2, v3);
-	}
-	if (Td[PA[*v4]] > Td[PA[*v5]]) {
+	if (Td[PA[*v4]] > Td[PA[*v5]])
 		SWAP(v4, v5);
-	}
 	if (Td[PA[*v2]] > Td[PA[*v4]]) {
 		SWAP(v2, v4);
 		SWAP(v3, v5);
 	}
-	if (Td[PA[*v1]] > Td[PA[*v3]]) {
+	if (Td[PA[*v1]] > Td[PA[*v3]])
 		SWAP(v1, v3);
-	}
 	if (Td[PA[*v1]] > Td[PA[*v4]]) {
 		SWAP(v1, v4);
 		SWAP(v3, v5);
 	}
-	if (Td[PA[*v3]] > Td[PA[*v4]]) {
+	if (Td[PA[*v3]] > Td[PA[*v4]])
 		return v4;
-	}
 	return v3;
 }
 
@@ -379,16 +365,14 @@ ss_partition(const int *PA, int *first, int *last, int depth)
 		}
 		for (; (a < --b) && ((PA[*b] + depth) < (PA[*b + 1] + 1));) {
 		}
-		if (b <= a) {
+		if (b <= a)
 			break;
-		}
 		t = ~*b;
 		*b = *a;
 		*a = t;
 	}
-	if (first < a) {
+	if (first < a)
 		*first = ~*first;
-	}
 	return a;
 }
 
@@ -422,9 +406,8 @@ ss_mintrosort(const unsigned char *T, const int *PA, int *first, int *last,
 		}
 
 		Td = T + depth;
-		if (limit-- == 0) {
+		if (limit-- == 0)
 			ss_heapsort(Td, PA, first, last - first);
-		}
 		if (limit < 0) {
 			for (a = first + 1, v = Td[PA[*first]]; a < last; ++a) {
 				if ((x = Td[PA[*a]]) != v) {
@@ -668,18 +651,16 @@ ss_inplacemerge(const unsigned char *T, const int *PA, int *first, int *middle,
 			ss_rotate(a, middle, last);
 			last -= middle - a;
 			middle = a;
-			if (first == middle) {
+			if (first == middle)
 				break;
-			}
 		}
 		--last;
 		if (x != 0) {
 			while (*--last < 0) {
 			}
 		}
-		if (middle == last) {
+		if (middle == last)
 			break;
-		}
 	}
 }
 
@@ -1074,13 +1055,11 @@ tr_insertionsort(const int *ISAd, int *first, int *last)
 			do {
 				*(b + 1) = *b;
 			} while ((first <= --b) && (*b < 0));
-			if (b < first) {
+			if (b < first)
 				break;
-			}
 		}
-		if (r == 0) {
+		if (r == 0)
 			*b = ~*b;
-		}
 		*(b + 1) = t;
 	}
 }
@@ -1101,9 +1080,8 @@ tr_fixdown(const int *ISAd, int *SA, int i, int size)
 			k = j;
 			d = e;
 		}
-		if (d <= c) {
+		if (d <= c)
 			break;
-		}
 	}
 	SA[i] = v;
 }
@@ -1118,14 +1096,12 @@ tr_heapsort(const int *ISAd, int *SA, int size)
 	m = size;
 	if ((size % 2) == 0) {
 		m--;
-		if (ISAd[SA[m / 2]] < ISAd[SA[m]]) {
+		if (ISAd[SA[m / 2]] < ISAd[SA[m]])
 			SWAP(SA[m], SA[m / 2]);
-		}
 	}
 
-	for (i = m / 2 - 1; 0 <= i; --i) {
+	for (i = m / 2 - 1; 0 <= i; --i)
 		tr_fixdown(ISAd, SA, i, m);
-	}
 	if ((size % 2) == 0) {
 		SWAP(SA[0], SA[m]);
 		tr_fixdown(ISAd, SA, 0, m);
@@ -1147,11 +1123,9 @@ tr_median3(const int *ISAd, int *v1, int *v2, int *v3)
 		SWAP(v1, v2);
 	}
 	if (ISAd[*v2] > ISAd[*v3]) {
-		if (ISAd[*v1] > ISAd[*v3]) {
+		if (ISAd[*v1] > ISAd[*v3])
 			return v1;
-		} else {
-			return v3;
-		}
+		return v3;
 	}
 	return v2;
 }
@@ -1160,26 +1134,22 @@ tr_median3(const int *ISAd, int *v1, int *v2, int *v3)
 static inline int *
 tr_median5(const int *ISAd, int *v1, int *v2, int *v3, int *v4, int *v5)
 {
-	if (ISAd[*v2] > ISAd[*v3]) {
+	if (ISAd[*v2] > ISAd[*v3])
 		SWAP(v2, v3);
-	}
-	if (ISAd[*v4] > ISAd[*v5]) {
+	if (ISAd[*v4] > ISAd[*v5])
 		SWAP(v4, v5);
-	}
 	if (ISAd[*v2] > ISAd[*v4]) {
 		SWAP(v2, v4);
 		SWAP(v3, v5);
 	}
-	if (ISAd[*v1] > ISAd[*v3]) {
+	if (ISAd[*v1] > ISAd[*v3])
 		SWAP(v1, v3);
-	}
 	if (ISAd[*v1] > ISAd[*v4]) {
 		SWAP(v1, v4);
 		SWAP(v3, v5);
 	}
-	if (ISAd[*v3] > ISAd[*v4]) {
+	if (ISAd[*v3] > ISAd[*v4])
 		return v4;
-	}
 	return v3;
 }
 
@@ -1290,18 +1260,14 @@ tr_partition(const int *ISAd, int *first, int *middle, int *last, int **pa,
 
 	if (a <= d) {
 		c = b - 1;
-		if ((s = a - first) > (t = b - a)) {
+		if ((s = a - first) > (t = b - a))
 			s = t;
-		}
-		for (e = first, f = b - s; 0 < s; --s, ++e, ++f) {
+		for (e = first, f = b - s; 0 < s; --s, ++e, ++f)
 			SWAP(*e, *f);
-		}
-		if ((s = d - c) > (t = last - d - 1)) {
+		if ((s = d - c) > (t = last - d - 1))
 			s = t;
-		}
-		for (e = b, f = last - s; 0 < s; --s, ++e, ++f) {
+		for (e = b, f = last - s; 0 < s; --s, ++e, ++f)
 			SWAP(*e, *f);
-		}
 		first += (b - a), last -= (d - c);
 	}
 	*pa = first, *pb = last;
@@ -1360,9 +1326,8 @@ tr_partialcopy(int *ISA, const int *SA, int *first, int *a, int *b, int *last,
 			lastrank = rank;
 			newrank = e - SA;
 		}
-		if (newrank != rank) {
+		if (newrank != rank)
 			ISA[*e] = newrank;
-		}
 	}
 
 	lastrank = -1;
@@ -1517,9 +1482,8 @@ tr_introsort(int *ISA, const int *ISAd, int *SA, int *first, int *last,
 							}
 						}
 					} else {
-						if (0 <= trlink) {
+						if (0 <= trlink)
 							stack[trlink].d = -1;
-						}
 						if (1 < (last - a)) {
 							first = a, limit = -3;
 						} else {
@@ -1565,13 +1529,11 @@ tr_introsort(int *ISA, const int *ISAd, int *SA, int *first, int *last,
 			next = (ISA[*a] != v) ? tr_ilg(b - a) : -1;
 
 			/* update ranks */
-			for (c = first, v = a - SA - 1; c < a; ++c) {
+			for (c = first, v = a - SA - 1; c < a; ++c)
 				ISA[*c] = v;
-			}
 			if (b < last) {
-				for (c = a, v = b - SA - 1; c < b; ++c) {
+				for (c = a, v = b - SA - 1; c < b; ++c)
 					ISA[*c] = v;
-				}
 			}
 
 			/* push */
@@ -1670,9 +1632,8 @@ tr_introsort(int *ISA, const int *ISAd, int *SA, int *first, int *last,
 					}
 				}
 			} else {
-				if ((1 < (b - a)) && (0 <= trlink)) {
+				if ((1 < (b - a)) && (0 <= trlink))
 					stack[trlink].d = -1;
-				}
 				if ((a - first) <= (last - b)) {
 					if (1 < (a - first)) {
 						STACK_PUSH5(ISAd, b, last,
@@ -1701,9 +1662,8 @@ tr_introsort(int *ISA, const int *ISAd, int *SA, int *first, int *last,
 			if (trbudget_check(budget, last - first)) {
 				limit = tr_ilg(last - first), ISAd += incr;
 			} else {
-				if (0 <= trlink) {
+				if (0 <= trlink)
 					stack[trlink].d = -1;
-				}
 				STACK_POP5(ISAd, first, last, limit, trlink);
 			}
 		}
@@ -1742,23 +1702,20 @@ trsort(int *ISA, int *SA, int n, int depth)
 					budget.count = 0;
 					tr_introsort(ISA, ISAd, SA, first, last,
 						     &budget);
-					if (budget.count != 0) {
+					if (budget.count != 0)
 						unsorted += budget.count;
-					} else {
+					else
 						skip = first - last;
-					}
 				} else if ((last - first) == 1) {
 					skip = -1;
 				}
 				first = last;
 			}
 		} while (first < (SA + n));
-		if (skip != 0) {
+		if (skip != 0)
 			*(first + skip) = skip;
-		}
-		if (unsorted == 0) {
+		if (unsorted == 0)
 			break;
-		}
 	}
 }
 
@@ -1854,9 +1811,8 @@ sort_typeBstar(const unsigned char *T, int *SA, int *bucket_A, int *bucket_B,
 					ISAb[SA[i]] = i;
 				} while ((0 <= --i) && (0 <= SA[i]));
 				SA[i + 1] = i - j;
-				if (i <= 0) {
+				if (i <= 0)
 					break;
-				}
 			}
 			j = i;
 			do {
@@ -1965,9 +1921,8 @@ construct_SA(const unsigned char *T, int *SA, int *bucket_A, int *bucket_B,
 		if (0 < (s = *i)) {
 			DIVSUFSORT_ASSERT(T[s - 1] >= T[s]);
 			c0 = T[--s];
-			if ((s == 0) || (T[s - 1] < c0)) {
+			if ((s == 0) || (T[s - 1] < c0))
 				s = ~s;
-			}
 			if (c0 != c2) {
 				BUCKET_A(c2) = k - SA;
 				k = SA + BUCKET_A(c2 = c0);
