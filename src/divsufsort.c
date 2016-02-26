@@ -28,6 +28,7 @@
 #  include "config.h"
 #endif
 
+#include "wimlib/bitops.h"
 #include "wimlib/divsufsort.h"
 #include "wimlib/util.h"
 
@@ -120,18 +121,7 @@ static const s32 lg_table[256] = {
 static inline s32
 ss_ilg(s32 n)
 {
-#if SS_BLOCKSIZE == 0
-	return (n & 0xffff0000)
-		   ? ((n & 0xff000000) ? 24 + lg_table[(n >> 24) & 0xff]
-				       : 16 + lg_table[(n >> 16) & 0xff])
-		   : ((n & 0x0000ff00) ? 8 + lg_table[(n >> 8) & 0xff]
-				       : 0 + lg_table[(n >> 0) & 0xff]);
-#elif SS_BLOCKSIZE < 256
-	return lg_table[n];
-#else
-	return (n & 0xff00) ? 8 + lg_table[(n >> 8) & 0xff]
-			    : 0 + lg_table[(n >> 0) & 0xff];
-#endif
+	return fls32(n);
 }
 
 #endif /* (SS_BLOCKSIZE == 0) || (SS_INSERTIONSORT_THRESHOLD < SS_BLOCKSIZE)   \
