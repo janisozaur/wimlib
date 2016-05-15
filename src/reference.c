@@ -29,6 +29,7 @@
 #include "wimlib/blob_table.h"
 #include "wimlib/error.h"
 #include "wimlib/glob.h"
+#include "wimlib/xml.h"
 #include "wimlib/wim.h"
 
 #define WIMLIB_REF_MASK_PUBLIC (WIMLIB_REF_FLAG_GLOB_ENABLE | \
@@ -91,6 +92,15 @@ blob_clone_if_new(struct blob_descriptor *blob, void *_info)
 	return 0;
 }
 
+static int
+record_referenced_wim(WIMStruct *wim, WIMStruct *referenced)
+{
+	return xml_record_referenced_wim(wim->xml_info,
+					 referenced->filename,
+					 referenced->hdr.part_number,
+					 referenced->hdr.guid);
+}
+
 /* API function documented in wimlib.h  */
 WIMLIBAPI int
 wimlib_reference_resources(WIMStruct *wim, WIMStruct **resource_wims,
@@ -118,6 +128,9 @@ wimlib_reference_resources(WIMStruct *wim, WIMStruct **resource_wims,
 	for (i = 0; i < num_resource_wims; i++) {
 		ret = for_blob_in_table(resource_wims[i]->blob_table,
 					blob_clone_if_new, &info);
+		if (ret)
+			break;
+		ret = record_referenced_wim(wim, resource_wims[i]);
 		if (ret)
 			break;
 	}
@@ -155,8 +168,9 @@ reference_resource_path(struct reference_info *info, const tchar *path,
 
 	info->src_table = src_wim->blob_table;
 	for_blob_in_table(src_wim->blob_table, blob_gift, info);
+	ret = record_referenced_wim(info->dest_wim, src_wim);
 	wimlib_free(src_wim);
-	return 0;
+	return ret;
 }
 
 static int

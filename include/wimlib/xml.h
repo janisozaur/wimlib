@@ -36,6 +36,10 @@ xml_get_windows_build_number(const struct wim_xml_info *info, int image);
 extern int
 xml_set_wimboot(struct wim_xml_info *info, int image);
 
+extern int
+xml_record_referenced_wim(struct wim_xml_info *info, const tchar *filename,
+			  unsigned part_number, const u8 *guid);
+
 /*****************************************************************************/
 
 extern int

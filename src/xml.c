@@ -671,6 +671,51 @@ xml_set_wimboot(struct wim_xml_info *info, int image)
 	return xml_set_ttext_by_path(info->images[image - 1], "WIMBOOT", T("1"));
 }
 
+int
+xml_record_referenced_wim(struct wim_xml_info *info, const tchar *filename,
+			  unsigned part_number, const u8 *guid)
+{
+	xmlNode *refs;
+	xmlNode *node;
+	xmlNode *ref;
+	int ret;
+	tchar str[GUID_SIZE * 2 + 1];
+
+	ref = xmlNewNode(NULL, "WIM");
+	if (!ref)
+		return WIMLIB_ERR_NOMEM;
+
+	ret = xml_set_ttext_by_path(ref, "FILENAME", filename);
+	if (ret)
+		goto err;
+
+	for (int i = 0; i < GUID_SIZE; i++)
+		tsprintf(&str[i * 2], T("%02x"), guid[i]);
+
+	ret = xml_set_ttext_by_path(ref, "GUID", str);
+	if (ret)
+		goto err;
+
+	tsprintf(str, "%u", part_number);
+
+	ret = xml_set_ttext_by_path(ref, "PARTNUMBER", str);
+	if (ret)
+		goto err;
+
+	ret = xml_ensure_node_by_path(info->root, "REFERENCES", &refs);
+	if (ret)
+		goto err;
+
+
+	xmlAddChild(refs, ref);
+
+	return 0;
+
+err:
+	xmlFreeNode(ref);
+	return ret;
+}
+
 /*
  * Update the DIRCOUNT, FILECOUNT, TOTALBYTES, HARDLINKBYTES, and
  * LASTMODIFICATIONTIME elements for the specified WIM image.
