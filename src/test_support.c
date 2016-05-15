@@ -741,7 +741,7 @@ generate_dentry_tree(struct wim_dentry **root_ret, const tchar *_ignored,
 		.params = params,
 	};
 
-	ctx.metadata_only = ((rand32() % 8) != 0); /* usually metadata only  */
+	ctx.metadata_only = 1;
 
 	ret = inode_table_new_dentry(params->inode_table, NULL, 0, 0, true, &root);
 	if (!ret) {
@@ -885,6 +885,32 @@ check_hard_link(struct wim_dentry *dentry, void *_ignore)
 	return WIMLIB_ERR_IMAGES_ARE_DIFFERENT;
 }
 
+static bool
+security_descriptors_equivalent(const void *_desc1, size_t size1,
+				const void *_desc2, size_t size2)
+{
+	const wimlib_SECURITY_DESCRIPTOR_RELATIVE *desc1 = _desc1,
+						  *desc2 = _desc2;
+
+	if (size1 != size2 || size1 < sizeof(wimlib_SECURITY_DESCRIPTOR_RELATIVE))
+		return false;
+
+	if (memcmp(desc1 + 1, desc2 + 1, size1 - sizeof(*desc1)))
+		return false;
+
+	if (desc1->revision != desc2->revision ||
+	    desc1->sbz1 != desc2->sbz1 ||
+	    ((le16_to_cpu(desc1->control) & ~wimlib_SE_SACL_AUTO_INHERITED) !=
+	     (le16_to_cpu(desc2->control) & ~wimlib_SE_SACL_AUTO_INHERITED)) ||
+	    desc1->owner_offset != desc2->owner_offset ||
+	    desc1->group_offset != desc2->group_offset ||
+	    desc1->sacl_offset != desc2->sacl_offset ||
+	    desc1->dacl_offset != desc2->dacl_offset)
+		return false;
+
+	return true;
+}
+
 static int
 cmp_inodes(const struct wim_inode *inode1, const struct wim_inode *inode2,
 	   const struct wim_image_metadata *imd1,
@@ -947,9 +973,20 @@ cmp_inodes(const struct wim_inode *inode1, const struct wim_inode *inode2,
 			size_t size1 = imd1->security_data->sizes[inode1->i_security_id];
 			size_t size2 = imd2->security_data->sizes[inode2->i_security_id];
 
-			if (size1 != size2 || memcmp(desc1, desc2, size1)) {
+			if (!security_descriptors_equivalent(desc1, size1,
+							     desc2, size2))
+			{
 				ERROR("Security descriptor of %"TS" differs!",
 				      inode_any_full_path(inode1));
+				if (wimlib_print_errors) {
+					fprintf(stderr, "Descriptor 1: ");
+					print_byte_field(desc1, size1, stderr);
+					fprintf(stderr, "\n");
+
+					fprintf(stderr, "Descriptor 2: ");
+					print_byte_field(desc2, size2, stderr);
+					fprintf(stderr, "\n");
+				}
 				return WIMLIB_ERR_IMAGES_ARE_DIFFERENT;
 			}
 		} else if (!(cmp_flags & WIMLIB_CMP_FLAG_SECURITY_NOT_PRESERVED)) {
