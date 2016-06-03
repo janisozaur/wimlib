@@ -2472,12 +2472,14 @@ lzx_get_needed_memory(size_t max_bufsize, unsigned compression_level,
 {
 	u64 size = 0;
 
+	destructive = false;
+
 	if (max_bufsize > LZX_MAX_WINDOW_SIZE)
 		return 0;
 
 	size += lzx_get_compressor_size(max_bufsize, compression_level);
 	if (!destructive)
-		size += max_bufsize; /* in_buffer */
+		size += max_bufsize + LZX_MAX_MATCH_LEN; /* in_buffer */
 	return size;
 }
 
@@ -2487,6 +2489,8 @@ lzx_create_compressor(size_t max_bufsize, unsigned compression_level,
 {
 	unsigned window_order;
 	struct lzx_compressor *c;
+
+	destructive = false;
 
 	window_order = lzx_get_window_order(max_bufsize);
 	if (window_order == 0)
@@ -2502,9 +2506,10 @@ lzx_create_compressor(size_t max_bufsize, unsigned compression_level,
 	c->window_order = window_order;
 
 	if (!c->destructive) {
-		c->in_buffer = MALLOC(max_bufsize);
+		c->in_buffer = MALLOC(max_bufsize + LZX_MAX_MATCH_LEN);
 		if (!c->in_buffer)
 			goto oom1;
+		randomize_byte_array(&c->in_buffer[max_bufsize], LZX_MAX_MATCH_LEN);
 	}
 
 	if (compression_level <= LZX_MAX_FAST_LEVEL) {
