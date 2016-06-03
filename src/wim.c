@@ -28,7 +28,6 @@
 #ifndef __WIN32__
 #  include <langinfo.h>
 #endif
-#include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -41,6 +40,7 @@
 #include "wimlib/integrity.h"
 #include "wimlib/metadata.h"
 #include "wimlib/security.h"
+#include "wimlib/threads.h"
 #include "wimlib/wim.h"
 #include "wimlib/xml.h"
 #include "wimlib/win32.h"
@@ -945,7 +945,7 @@ wimlib_get_version(void)
 }
 
 static bool lib_initialized = false;
-static pthread_mutex_t lib_initialization_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct mutex lib_initialization_mutex = MUTEX_INITIALIZER;
 
 /* API function documented in wimlib.h  */
 WIMLIBAPI int
@@ -956,7 +956,7 @@ wimlib_global_init(int init_flags)
 	if (lib_initialized)
 		goto out;
 
-	pthread_mutex_lock(&lib_initialization_mutex);
+	mutex_lock(&lib_initialization_mutex);
 
 	if (lib_initialized)
 		goto out_unlock;
@@ -996,7 +996,7 @@ wimlib_global_init(int init_flags)
 	lib_initialized = true;
 	ret = 0;
 out_unlock:
-	pthread_mutex_unlock(&lib_initialization_mutex);
+	mutex_unlock(&lib_initialization_mutex);
 out:
 	return ret;
 }
@@ -1008,7 +1008,7 @@ wimlib_global_cleanup(void)
 	if (!lib_initialized)
 		return;
 
-	pthread_mutex_lock(&lib_initialization_mutex);
+	mutex_lock(&lib_initialization_mutex);
 
 	if (!lib_initialized)
 		goto out_unlock;
@@ -1022,5 +1022,5 @@ wimlib_global_cleanup(void)
 	lib_initialized = false;
 
 out_unlock:
-	pthread_mutex_unlock(&lib_initialization_mutex);
+	mutex_unlock(&lib_initialization_mutex);
 }

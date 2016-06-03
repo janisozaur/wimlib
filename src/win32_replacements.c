@@ -27,7 +27,6 @@
 #endif
 
 #include <errno.h>
-#include <pthread.h>
 #include <io.h>	/* for _get_osfhandle()  */
 #include <fcntl.h>
 
@@ -36,6 +35,7 @@
 #include "wimlib/assert.h"
 #include "wimlib/glob.h"
 #include "wimlib/error.h"
+#include "wimlib/threads.h"
 #include "wimlib/util.h"
 
 static int
@@ -474,12 +474,12 @@ err_set_errno:
 int
 win32_strerror_r_replacement(int errnum, wchar_t *buf, size_t buflen)
 {
-	static pthread_mutex_t strerror_lock = PTHREAD_MUTEX_INITIALIZER;
+	static struct mutex strerror_lock = MUTEX_INITIALIZER;
 
-	pthread_mutex_lock(&strerror_lock);
+	mutex_lock(&strerror_lock);
 	mbstowcs(buf, strerror(errnum), buflen);
 	buf[buflen - 1] = '\0';
-	pthread_mutex_unlock(&strerror_lock);
+	mutex_unlock(&strerror_lock);
 	return 0;
 }
 
