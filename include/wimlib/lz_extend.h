@@ -47,34 +47,30 @@ lz_extend(const u8 * const strptr, const u8 * const matchptr,
 	return min(max_len, len + (ffsw(v_word) >> 3));
 #else
 
-	const u8 *p1 = strptr + start_len;
-	const u8 *p2 = matchptr + start_len;
-
+	u64 len = start_len;
 	u8 saved = strptr[max_len];
 	((u8 *)strptr)[max_len] = matchptr[max_len] + 1;
 
 	__asm__(
-		"  movdqu (%[p1]), %%xmm0                    \n"
-		"  pcmpestri $0x18, (%[p2]), %%xmm0          \n"
+		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
+		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
 		"  jc 2f                                     \n"
 		"1:                                          \n"
-		"  add $0x10, %[p1]                          \n"
-		"  add $0x10, %[p2]                          \n"
-		"  movdqu (%[p1]), %%xmm0                    \n"
-		"  pcmpestri $0x18, (%[p2]), %%xmm0          \n"
+		"  add $0x10, %[len]                         \n"
+		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
+		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
 		"  jnc 1b                                    \n"
 		"2:                                          \n"
-		"  add %%rcx, %[p1]                          \n"
-		"  add %%rcx, %[p2]                          \n"
-		: [p1] "+r" (p1), [p2] "+r" (p2)
-		: "a" (16), "d" (16)
+		"  add %%rcx, %[len]                         \n"
+		: [len] "+r" (len)
+		: "a" (16), "d" (16), [strptr] "r" (strptr), [matchptr] "r" (matchptr)
 		: "rcx", "cc", "xmm0", "memory"
 	       );
 
 
 	((u8 *)strptr)[max_len] = saved;
 
-	return p1 - strptr;
+	return len;
 #endif
 }
 
