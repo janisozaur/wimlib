@@ -67,8 +67,7 @@ typedef wchar_t tchar;
 #  define tglob		win32_wglob
 #else /* __WIN32__ */
 /* For non-Windows builds, the "tchar" type will be one byte and will specify a
- * string in the locale-dependent multibyte encoding.  However, only UTF-8 is
- * well supported in this library. */
+ * string in UTF-8. */
 typedef char tchar;
 #  define TCHAR_IS_UTF16LE 0
 #  define T(text) text /* In this case, strings of "tchar" are simply strings of

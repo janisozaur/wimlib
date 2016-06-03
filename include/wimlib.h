@@ -151,10 +151,7 @@
  * and the encoding is UTF-16LE.
  *
  * On UNIX-like systems, each ::wimlib_tchar is 1 byte and is simply a "char",
- * and the encoding is the locale-dependent multibyte encoding.  I recommend you
- * set your locale to a UTF-8 capable locale to avoid any issues.  Also, by
- * default, wimlib on UNIX will assume the locale is UTF-8 capable unless you
- * call wimlib_global_init() after having set your desired locale.
+ * and the encoding is UTF-8.
  *
  * @section sec_advanced Additional information and features
  *
@@ -2323,9 +2320,8 @@ typedef int (*wimlib_iterate_lookup_table_callback_t)(const struct wimlib_resour
 /** @addtogroup G_general
  * @{ */
 
-/** Assume that strings are represented in UTF-8, even if this is not the
- * locale's character encoding.  This flag is ignored on Windows, where wimlib
- * always uses UTF-16LE.  */
+/** Deprecated; no longer has any effect.  The library now always assumes UTF-8
+ * encoding on non-Windows systems.  */
 #define WIMLIB_INIT_FLAG_ASSUME_UTF8			0x00000001
 
 /** Windows-only: do not attempt to acquire additional privileges (currently
@@ -2462,7 +2458,6 @@ enum wimlib_error_code {
 	WIMLIB_ERR_DECOMPRESSION                      = 2,
 	WIMLIB_ERR_FUSE                               = 6,
 	WIMLIB_ERR_GLOB_HAD_NO_MATCHES                = 8,
-	WIMLIB_ERR_ICONV_NOT_AVAILABLE                = 9,
 	WIMLIB_ERR_IMAGE_COUNT                        = 10,
 	WIMLIB_ERR_IMAGE_NAME_COLLISION               = 11,
 	WIMLIB_ERR_INSUFFICIENT_PRIVILEGES            = 12,
@@ -2475,7 +2470,6 @@ enum wimlib_error_code {
 	WIMLIB_ERR_INVALID_INTEGRITY_TABLE            = 19,
 	WIMLIB_ERR_INVALID_LOOKUP_TABLE_ENTRY         = 20,
 	WIMLIB_ERR_INVALID_METADATA_RESOURCE          = 21,
-	WIMLIB_ERR_INVALID_MULTIBYTE_STRING           = 22,
 	WIMLIB_ERR_INVALID_OVERLAY                    = 23,
 	WIMLIB_ERR_INVALID_PARAM                      = 24,
 	WIMLIB_ERR_INVALID_PART_NUMBER                = 25,
@@ -3278,9 +3272,8 @@ wimlib_get_xml_data(WIMStruct *wim, void **buf_ret, size_t *bufsize_ret);
  *
  * Initialization function for wimlib.  Call before using any other wimlib
  * function (except possibly wimlib_set_print_errors()).  If not done manually,
- * this function will be called automatically with @p init_flags set to
- * ::WIMLIB_INIT_FLAG_ASSUME_UTF8.  This function does nothing if called again
- * after it has already successfully run.
+ * this function will be called automatically with a flags argument of 0.  This
+ * function does nothing if called again after it has already successfully run.
  *
  * @param init_flags
  *	Bitwise OR of flags prefixed with WIMLIB_INIT_FLAG.
