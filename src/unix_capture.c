@@ -25,6 +25,11 @@
 #  include "config.h"
 #endif
 
+#if defined(HAVE_SYS_IOCTL_H) && defined(HAVE_LINUX_MSDOS_FS_H)
+#  include <linux/msdos_fs.h>
+#  include <sys/ioctl.h>
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -106,7 +111,8 @@ unix_scan_regular_file(const char *path, u64 size, struct wim_inode *inode,
 	struct blob_descriptor *blob = NULL;
 	struct wim_inode_stream *strm;
 
-	inode->i_attributes = FILE_ATTRIBUTE_NORMAL;
+	if (inode->i_attributes == 0)
+		inode->i_attributes = FILE_ATTRIBUTE_NORMAL;
 
 	if (size) {
 		blob = new_blob_descriptor();
@@ -141,25 +147,16 @@ unix_build_dentry_tree_recursive(struct wim_dentry **tree_ret,
 static int
 unix_scan_directory(struct wim_dentry *dir_dentry,
 		    char *full_path, size_t full_path_len,
-		    int parent_dirfd, const char *dir_relpath,
-		    struct scan_params *params)
+		    int *dirfd, struct scan_params *params)
 {
-
-	int dirfd;
 	DIR *dir;
 	int ret;
 
-	dirfd = my_openat(full_path, parent_dirfd, dir_relpath, O_RDONLY);
-	if (dirfd < 0) {
-		ERROR_WITH_ERRNO("\"%s\": Can't open directory", full_path);
-		return WIMLIB_ERR_OPENDIR;
-	}
-
-	dir_dentry->d_inode->i_attributes = FILE_ATTRIBUTE_DIRECTORY;
-	dir = my_fdopendir(&dirfd);
+	dir_dentry->d_inode->i_attributes &= ~FILE_ATTRIBUTE_NORMAL;
+	dir_dentry->d_inode->i_attributes |= FILE_ATTRIBUTE_DIRECTORY;
+	dir = my_fdopendir(dirfd);
 	if (!dir) {
 		ERROR_WITH_ERRNO("\"%s\": Can't open directory", full_path);
-		close(dirfd);
 		return WIMLIB_ERR_OPENDIR;
 	}
 
@@ -190,7 +187,7 @@ unix_scan_directory(struct wim_dentry *dir_dentry,
 		ret = unix_build_dentry_tree_recursive(&child,
 						       full_path,
 						       full_path_len + 1 + name_len,
-						       dirfd,
+						       *dirfd,
 						       &full_path[full_path_len + 1],
 						       params);
 		full_path[full_path_len] = '\0';
@@ -199,6 +196,7 @@ unix_scan_directory(struct wim_dentry *dir_dentry,
 		attach_scanned_tree(dir_dentry, child, params->blob_table);
 	}
 	closedir(dir);
+	*dirfd = -1;
 	return ret;
 }
 
@@ -345,6 +343,7 @@ unix_build_dentry_tree_recursive(struct wim_dentry **tree_ret,
 	int ret;
 	struct stat stbuf;
 	int stat_flags;
+	int fd = -1;
 
 	ret = try_exclude(full_path, params);
 	if (unlikely(ret < 0)) /* Excluded? */
@@ -398,6 +397,29 @@ unix_build_dentry_tree_recursive(struct wim_dentry **tree_ret,
 	if (inode->i_nlink > 1)
 		goto out_progress;
 
+	if (S_ISDIR(stbuf.st_mode)
+	#ifdef FAT_IOCTL_GET_ATTRIBUTES
+	    || S_ISREG(stbuf.st_mode)
+	#endif
+	) {
+		fd = my_openat(full_path, dirfd, relpath, O_RDONLY);
+		if (fd < 0) {
+			ERROR_WITH_ERRNO("\"%s\": Can't open for read", full_path);
+			ret = WIMLIB_ERR_OPEN;
+			goto out;
+		}
+
+	#ifdef FAT_IOCTL_GET_ATTRIBUTES
+		if (ioctl(fd, FAT_IOCTL_GET_ATTRIBUTES, &inode->i_attributes) &&
+		    errno != ENOTTY)
+		{
+			ERROR_WITH_ERRNO("\"%s\": Can't get attributes", full_path);
+			ret = WIMLIB_ERR_STAT;
+			goto out;
+		}
+	#endif
+	}
+
 #ifdef HAVE_STAT_NANOSECOND_PRECISION
 	inode->i_creation_time = timespec_to_wim_timestamp(&stbuf.st_mtim);
 	inode->i_last_write_time = timespec_to_wim_timestamp(&stbuf.st_mtim);
@@ -431,7 +453,7 @@ unix_build_dentry_tree_recursive(struct wim_dentry **tree_ret,
 					     inode, params->unhashed_blobs);
 	} else if (S_ISDIR(stbuf.st_mode)) {
 		ret = unix_scan_directory(tree, full_path, full_path_len,
-					  dirfd, relpath, params);
+					  &fd, params);
 	} else if (S_ISLNK(stbuf.st_mode)) {
 		ret = unix_scan_symlink(full_path, dirfd, relpath,
 					inode, params);
@@ -452,6 +474,8 @@ out:
 		tree = NULL;
 		ret = report_scan_error(params, ret, full_path);
 	}
+	if (fd >= 0)
+		close(fd);
 	*tree_ret = tree;
 	return ret;
 }

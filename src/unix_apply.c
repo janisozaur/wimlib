@@ -23,6 +23,14 @@
 #  include "config.h"
 #endif
 
+#if defined(HAVE_SYS_IOCTL_H) && \
+	defined(HAVE_LINUX_MSDOS_FS_H) && \
+	defined(HAVE_SYS_VFS_H)
+#  include <linux/msdos_fs.h>
+#  include <sys/ioctl.h>
+#  include <sys/vfs.h>
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -54,6 +62,33 @@ static int
 unix_get_supported_features(const char *target,
 			    struct wim_features *supported_features)
 {
+#ifdef FAT_IOCTL_SET_ATTRIBUTES
+	char *path, *p;
+	struct statfs fsinfo;
+	int res;
+
+	path = STRDUP(target);
+	if (!path)
+		return WIMLIB_ERR_NOMEM;
+	p = strchr(path, '\0');
+	while (p > target && *(p - 1) == '/')
+		p--;
+	while (p > target && *(p - 1) != '/')
+		p--;
+	*p = '\0';
+	res = statfs(path, &fsinfo);
+	FREE(path);
+	if (!res && fsinfo.f_type == MSDOS_SUPER_MAGIC) {
+		/* FAT filesystem mounted on Linux  */
+		supported_features->readonly_files = 1;
+		supported_features->hidden_files = 1;
+		supported_features->system_files = 1;
+		supported_features->archive_files = 1;
+		supported_features->timestamps = 1;
+		return 0;
+	}
+#endif
+
 	supported_features->hard_links = 1;
 	supported_features->symlink_reparse_points = 1;
 	supported_features->unix_data = 1;
@@ -267,9 +302,27 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 {
 	int ret;
 	struct wimlib_unix_data unix_data;
+	bool opened = false;
 
 	if (fd < 0 && !path)
 		path = unix_build_inode_extraction_path(inode, ctx);
+
+#ifdef FAT_IOCTL_SET_ATTRIBUTES
+	bool set_attributes =
+		ctx->common.supported_features.readonly_files &&
+		!(ctx->common.extract_flags & WIMLIB_EXTRACT_FLAG_NO_ATTRIBUTES) &&
+		!inode_is_symlink(inode);
+
+	if (fd < 0 && set_attributes) {
+		fd = open(path, O_RDONLY | O_NOFOLLOW);
+		if (fd < 0) {
+			ERROR_WITH_ERRNO("Can't open \"%s\"", path);
+			ret = WIMLIB_ERR_OPEN;
+			goto out;
+		}
+		opened = true;
+	}
+#endif
 
 	if ((ctx->common.extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA)
 	    && inode_get_unix_data(inode, &unix_data))
@@ -288,7 +341,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 				ERROR_WITH_ERRNO("Can't set uid=%"PRIu32" and "
 						 "gid=%"PRIu32" on \"%s\"",
 						 uid, gid, path);
-				return ret;
+				goto out;
 			} else {
 				WARNING_WITH_ERRNO("Can't set uid=%"PRIu32" and "
 						   "gid=%"PRIu32" on \"%s\"",
@@ -307,7 +360,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 			{
 				ERROR_WITH_ERRNO("Can't set mode=0%"PRIo32" "
 						 "on \"%s\"", mode, path);
-				return ret;
+				goto out;
 			} else {
 				WARNING_WITH_ERRNO("Can't set mode=0%"PRIo32" "
 						   "on \"%s\"", mode, path);
@@ -325,12 +378,28 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 		    WIMLIB_EXTRACT_FLAG_STRICT_TIMESTAMPS)
 		{
 			ERROR_WITH_ERRNO("Can't set timestamps on \"%s\"", path);
-			return ret;
+			goto out;
 		} else {
 			WARNING_WITH_ERRNO("Can't set timestamps on \"%s\"", path);
 		}
 	}
-	return 0;
+
+#ifdef FAT_IOCTL_SET_ATTRIBUTES
+	if (set_attributes &&
+	    ioctl(fd, FAT_IOCTL_SET_ATTRIBUTES, &inode->i_attributes) &&
+	    errno != ENOTTY)
+	{
+		if (!path)
+			path = unix_build_inode_extraction_path(inode, ctx);
+		WARNING_WITH_ERRNO("Can't set attributes on \"%s\"", path);
+	}
+#endif
+
+	ret = 0;
+out:
+	if (opened)
+		close(fd);
+	return ret;
 }
 
 /* Extract all needed aliases of the @inode, where one alias, corresponding to

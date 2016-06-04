@@ -69,6 +69,7 @@ AC_CHECK_HEADERS([alloca.h		\
 		  endian.h		\
 		  errno.h		\
 		  glob.h		\
+		  linux/msdos_fs.h	\
 		  machine/endian.h	\
 		  stdarg.h		\
 		  stddef.h		\
@@ -76,9 +77,11 @@ AC_CHECK_HEADERS([alloca.h		\
 		  sys/byteorder.h	\
 		  sys/endian.h		\
 		  sys/file.h		\
+		  sys/ioctl.h		\
 		  sys/param.h		\
 		  sys/sysctl.h		\
 		  sys/times.h		\
+		  sys/vfs.h		\
 		  time.h		\
 		  utime.h])
 
