@@ -1311,7 +1311,7 @@ observe_literal(struct block_split_stats *stats, u8 lit)
 static inline void
 observe_match(struct block_split_stats *stats, unsigned length)
 {
-	stats->new_observations[NUM_LITERAL_OBSERVATION_TYPES + (length >= 9)]++;
+	stats->new_observations[NUM_LITERAL_OBSERVATION_TYPES + (length >= 5)]++;
 	stats->num_new_observations++;
 }
 
@@ -1333,7 +1333,7 @@ do_end_block_check(struct block_split_stats *stats, u32 block_size)
 		}
 
 		/* Ready to end the block? */
-		if (total_delta + (block_size >> 12) * stats->num_observations >=
+		if (total_delta + (block_size >> 10) * stats->num_observations >=
 		    200 * stats->num_observations)
 			return true;
 	}
