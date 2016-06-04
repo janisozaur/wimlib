@@ -140,7 +140,7 @@
  * lower than the limits defined by the LZX format.  This does not significantly
  * affect the compression ratio, at least for the block sizes we use.
  */
-#define MAIN_CODEWORD_LIMIT	12	/* 64-bit: can buffer 4 main symbols  */
+#define MAIN_CODEWORD_LIMIT	16
 #define LENGTH_CODEWORD_LIMIT	12
 #define ALIGNED_CODEWORD_LIMIT	7
 #define PRE_CODEWORD_LIMIT	7
@@ -903,27 +903,24 @@ lzx_write_sequences(struct lzx_output_bitstream *os, int block_type,
 
 			/* Verify optimization is enabled on 64-bit  */
 			STATIC_ASSERT(sizeof(machine_word_t) < 8 ||
-				      CAN_BUFFER(4 * MAIN_CODEWORD_LIMIT));
+				      CAN_BUFFER(3 * MAIN_CODEWORD_LIMIT));
 
-			if (CAN_BUFFER(4 * MAIN_CODEWORD_LIMIT)) {
+			if (CAN_BUFFER(3 * MAIN_CODEWORD_LIMIT)) {
 
-				/* 64-bit: write 4 literals at a time.  */
-				while (litrunlen >= 4) {
+				/* 64-bit: write 3 literals at a time.  */
+				while (litrunlen >= 3) {
 					unsigned lit0 = block_data[0];
 					unsigned lit1 = block_data[1];
 					unsigned lit2 = block_data[2];
-					unsigned lit3 = block_data[3];
 					lzx_add_bits(os, codes->codewords.main[lit0],
 						     codes->lens.main[lit0]);
 					lzx_add_bits(os, codes->codewords.main[lit1],
 						     codes->lens.main[lit1]);
 					lzx_add_bits(os, codes->codewords.main[lit2],
 						     codes->lens.main[lit2]);
-					lzx_add_bits(os, codes->codewords.main[lit3],
-						     codes->lens.main[lit3]);
-					lzx_flush_bits(os, 4 * MAIN_CODEWORD_LIMIT);
-					block_data += 4;
-					litrunlen -= 4;
+					lzx_flush_bits(os, 3 * MAIN_CODEWORD_LIMIT);
+					block_data += 3;
+					litrunlen -= 3;
 				}
 				if (litrunlen--) {
 					unsigned lit = *block_data++;
@@ -933,14 +930,7 @@ lzx_write_sequences(struct lzx_output_bitstream *os, int block_type,
 						unsigned lit = *block_data++;
 						lzx_add_bits(os, codes->codewords.main[lit],
 							     codes->lens.main[lit]);
-						if (litrunlen--) {
-							unsigned lit = *block_data++;
-							lzx_add_bits(os, codes->codewords.main[lit],
-								     codes->lens.main[lit]);
-							lzx_flush_bits(os, 3 * MAIN_CODEWORD_LIMIT);
-						} else {
-							lzx_flush_bits(os, 2 * MAIN_CODEWORD_LIMIT);
-						}
+						lzx_flush_bits(os, 2 * MAIN_CODEWORD_LIMIT);
 					} else {
 						lzx_flush_bits(os, 1 * MAIN_CODEWORD_LIMIT);
 					}
