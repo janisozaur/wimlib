@@ -25,7 +25,7 @@ sed -i -e	\
     s/\(#define[ \t]\+MIN_BLOCK_SIZE[ \t]\+\)[0-9]\+/\1$MIN_BLOCK_SIZE/
 " "$topdir/src/lzx_compress.c"
 
-make -C "$topdir" -j$(grep -c processor /proc/cpuinfo) > /dev/null
+make -C "$topdir" -j$(grep -c processor /proc/cpuinfo) &> /dev/null
 
 rm -f "$tmpfile"
 "$topdir/wimlib-imagex" export "$INPUTFILE" all "$tmpfile" \

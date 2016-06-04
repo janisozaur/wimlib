@@ -19,5 +19,6 @@ fn = function(params) {
     return(result)
 }
 
-result = optim(PARAMS$INITIAL, fn)
+result = optim(PARAMS$INITIAL, fn, method="L-BFGS-B",
+               lower=PARAMS$MIN, upper=PARAMS$MAX)
 print(result)
