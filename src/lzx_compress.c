@@ -184,22 +184,45 @@ struct lzx_lens {
 	u8 aligned[LZX_ALIGNEDCODE_NUM_SYMBOLS];
 };
 
+struct lzx_cost {
+#if CPU_IS_64BIT
+	/* In the version optimized for 64-bit processors, we allow accessing
+	 * the 64-bit variable 'cost64', which contains 'cost' in its high 32
+	 * bits.  */
+	union {
+		u64 cost64;
+
+		struct {
+		#if CPU_IS_LITTLE_ENDIAN
+			u32 zero;
+			u32 cost;
+		#else
+			u32 cost;
+			u32 zero;
+		#endif
+		};
+	};
+#else
+	u32 cost;
+#endif
+};
+
 /* Cost model for near-optimal parsing  */
 struct lzx_costs {
 
 	/* 'match_cost[offset_slot][len - LZX_MIN_MATCH_LEN]' is the cost for a
 	 * length 'len' match that has an offset belonging to 'offset_slot'.  */
-	u32 match_cost[LZX_MAX_OFFSET_SLOTS][LZX_NUM_LENS];
+	struct lzx_cost match_cost[LZX_MAX_OFFSET_SLOTS][LZX_NUM_LENS];
 
 	/* Cost for each symbol in the main code  */
-	u32 main[LZX_MAINCODE_MAX_NUM_SYMBOLS];
+	struct lzx_cost main[LZX_MAINCODE_MAX_NUM_SYMBOLS];
 
 	/* Cost for each symbol in the length code  */
-	u32 len[LZX_LENCODE_NUM_SYMBOLS];
+	struct lzx_cost len[LZX_LENCODE_NUM_SYMBOLS];
 
 #if LZX_CONSIDER_ALIGNED_COSTS
 	/* Cost for each symbol in the aligned code  */
-	u32 aligned[LZX_ALIGNEDCODE_NUM_SYMBOLS];
+	struct lzx_cost aligned[LZX_ALIGNEDCODE_NUM_SYMBOLS];
 #endif
 };
 
@@ -263,6 +286,25 @@ struct lzx_sequence {
  */
 struct lzx_optimum_node {
 
+#if CPU_IS_64BIT
+	union {
+		/* In the version optimized for 64-bit processors, we allow
+		 * accessing the whole edge using the 64-bit variable 'edge'.
+		 * 'edge' always contains 'cost' in its high 32 bits and 'item'
+		 * in its low 32 bits.  */
+		u64 edge;
+		struct {
+		#if CPU_IS_LITTLE_ENDIAN
+			u32 item;
+			u32 cost;
+		#else
+			u32 cost;
+			u32 item;
+		#endif
+		};
+	};
+#else
+
 	/* The cost, in bits, of the lowest-cost path that has been found to
 	 * reach this position.  This can change as progressively lower cost
 	 * paths are found to reach this position.  */
@@ -285,9 +327,11 @@ struct lzx_optimum_node {
 	 *	Low bits are the match length, high bits are the queue index.
 	 */
 	u32 item;
-#define OPTIMUM_OFFSET_SHIFT 9
-#define OPTIMUM_LEN_MASK ((1 << OPTIMUM_OFFSET_SHIFT) - 1)
+#endif
 } _aligned_attribute(8);
+
+#define OPTIMUM_OFFSET_SHIFT	9
+#define OPTIMUM_LEN_MASK	(((u32)1 << OPTIMUM_OFFSET_SHIFT) - 1)
 
 /*
  * Least-recently-used queue for match offsets.
@@ -1514,6 +1558,74 @@ out:
 }
 
 /*
+ * Macros for lzx_find_min_cost_path():
+ *
+ * The SET_BASE() macro sets the value of 'base', which contains the cost to
+ * reach 'cur_node' from the beginning of the block.  In the version optimized
+ * for 64-bit processors, 'base' also contains the item for the edge currently
+ * being considered: the cost is held in the high 32 bits, and the item is held
+ * in the low 32 bits.
+ *
+ * The EDGE_STEP() macro considers an edge from 'cur_node' to 'cur_node +
+ * next_len' and saves it if it results in a cheaper path to reach 'cur_node +
+ * next_len' from the beginning of the block.
+ *
+ * The ADD_ALIGNED_COST() macro updates 'base' to account for the aligned offset
+ * symbol for the specified adjusted offset.  In the version optimized for
+ * 64-bit processors, it adds the cost to the high 32 bits of the 64-bit
+ * variable 'base', whereas in the default version it adds the cost to the
+ * 32-bit variable 'base'.
+ */
+
+#if CPU_IS_64BIT
+
+#define SET_BASE(offset_data)							\
+	base = (cur_node->edge & 0xFFFFFFFF00000000) +				\
+		((offset_data) << OPTIMUM_OFFSET_SHIFT) +			\
+		next_len;
+
+#define EDGE_STEP(offset_slot, offset_data, is_rep)				\
+{										\
+	u64 new_edge = base +							\
+		       c->costs.match_cost[offset_slot]				\
+					  [next_len - LZX_MIN_MATCH_LEN].cost64;\
+	u64 prev_edge = (cur_node + next_len)->edge;				\
+	(cur_node + next_len)->edge =						\
+		((is_rep) ? (new_edge <= prev_edge) :				\
+			    (new_edge < prev_edge)) ? new_edge : prev_edge;	\
+	base++;									\
+}
+
+#define ADD_ALIGNED_COST(adjusted_offset)					\
+	base += c->costs.aligned[(adjusted_offset) &				\
+				 LZX_ALIGNED_OFFSET_BITMASK].cost64;
+
+#else /* CPU_IS_64BIT */
+
+#define SET_BASE(offset_data)							\
+	base = cur_node->cost;
+
+#define EDGE_STEP(offset_slot, offset_data, is_rep)				\
+{										\
+	u32 cost = base +							\
+		   c->costs.match_cost[offset_slot]				\
+				      [next_len - LZX_MIN_MATCH_LEN].cost;	\
+	if ((is_rep) ? (cost <= (cur_node + next_len)->cost) :			\
+		       (cost < (cur_node + next_len)->cost))			\
+	{									\
+		(cur_node + next_len)->cost = cost;				\
+		(cur_node + next_len)->item =					\
+			((offset_data) << OPTIMUM_OFFSET_SHIFT) | next_len;	\
+	}									\
+}
+
+#define ADD_ALIGNED_COST(adjusted_offset)					\
+	base += c->costs.aligned[(adjusted_offset) &				\
+				 LZX_ALIGNED_OFFSET_BITMASK].cost;
+
+#endif /* !CPU_IS_64BIT */
+
+/*
  * Find an inexpensive path through the graph of possible match/literal choices
  * for the current block.  The nodes of the graph are
  * c->optimum_nodes[0...block_size].  They correspond directly to the bytes in
@@ -1608,29 +1720,24 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		cache_ptr++;
 
 		if (num_matches) {
-			struct lz_match *end_matches = cache_ptr + num_matches;
+			struct lz_match *matches = cache_ptr;
 			unsigned next_len = LZX_MIN_MATCH_LEN;
 			unsigned max_len = min(block_end - in_next, LZX_MAX_MATCH_LEN);
 			const u8 *matchptr;
+			machine_word_t base;
+
+			cache_ptr += num_matches;
 
 			/* Consider R0 match  */
 			matchptr = in_next - lzx_lru_queue_R0(QUEUE(in_next));
 			if (load_u16_unaligned(matchptr) != load_u16_unaligned(in_next))
 				goto R0_done;
 			STATIC_ASSERT(LZX_MIN_MATCH_LEN == 2);
+			SET_BASE(0);
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[0][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(0 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				EDGE_STEP(0, 0, 1);
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R0_done:
@@ -1644,19 +1751,11 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 			for (unsigned len = 2; len < next_len - 1; len++)
 				if (matchptr[len] != in_next[len])
 					goto R1_done;
+			SET_BASE(1);
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[1][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(1 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				EDGE_STEP(1, 1, 1);
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R1_done:
@@ -1670,52 +1769,35 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 			for (unsigned len = 2; len < next_len - 1; len++)
 				if (matchptr[len] != in_next[len])
 					goto R2_done;
+			SET_BASE(2);
 			do {
-				u32 cost = cur_node->cost +
-					   c->costs.match_cost[2][
-							next_len - LZX_MIN_MATCH_LEN];
-				if (cost <= (cur_node + next_len)->cost) {
-					(cur_node + next_len)->cost = cost;
-					(cur_node + next_len)->item =
-						(2 << OPTIMUM_OFFSET_SHIFT) | next_len;
-				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				EDGE_STEP(2, 2, 1);
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R2_done:
 
-			while (next_len > cache_ptr->length)
-				if (++cache_ptr == end_matches)
+			while (next_len > matches->length)
+				if (++matches == cache_ptr)
 					goto done_matches;
 
 			/* Consider explicit offset matches  */
 			do {
-				u32 offset = cache_ptr->offset;
-				u32 offset_data = offset + LZX_OFFSET_ADJUSTMENT;
+				u32 offset_data = matches->offset + LZX_OFFSET_ADJUSTMENT;
 				unsigned offset_slot = lzx_comp_get_offset_slot(c, offset_data,
 										is_16_bit);
-				u32 base_cost = cur_node->cost;
+
+				SET_BASE(offset_data);
 
 			#if LZX_CONSIDER_ALIGNED_COSTS
 				if (offset_data >= 16)
-					base_cost += c->costs.aligned[offset_data &
-								      LZX_ALIGNED_OFFSET_BITMASK];
+					ADD_ALIGNED_COST(offset_data);
 			#endif
-
 				do {
-					u32 cost = base_cost +
-						   c->costs.match_cost[offset_slot][
-								next_len - LZX_MIN_MATCH_LEN];
-					if (cost < (cur_node + next_len)->cost) {
-						(cur_node + next_len)->cost = cost;
-						(cur_node + next_len)->item =
-							(offset_data << OPTIMUM_OFFSET_SHIFT) | next_len;
-					}
-				} while (++next_len <= cache_ptr->length);
-			} while (++cache_ptr != end_matches);
+					EDGE_STEP(offset_slot, offset_data, 0);
+				} while (++next_len <= matches->length);
+			} while (++matches != cache_ptr);
 		}
 
 	done_matches:
@@ -1726,7 +1808,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		 * of coding the literal is integrated into the queue update
 		 * code below.  */
 		literal = *in_next++;
-		cost = cur_node->cost + c->costs.main[literal];
+		cost = cur_node->cost + c->costs.main[literal].cost;
 
 		/* Advance to the next position.  */
 		cur_node++;
@@ -1783,14 +1865,14 @@ lzx_compute_match_costs(struct lzx_compressor *c)
 	#endif
 
 		for (i = 0; i < LZX_NUM_PRIMARY_LENS; i++)
-			costs->match_cost[offset_slot][i] =
-				costs->main[main_symbol++] + extra_cost;
+			costs->match_cost[offset_slot][i].cost =
+				costs->main[main_symbol++].cost + extra_cost;
 
-		extra_cost += costs->main[main_symbol];
+		extra_cost += costs->main[main_symbol].cost;
 
 		for (; i < LZX_NUM_LENS; i++)
-			costs->match_cost[offset_slot][i] =
-				costs->len[i - LZX_NUM_PRIMARY_LENS] + extra_cost;
+			costs->match_cost[offset_slot][i].cost =
+				costs->len[i - LZX_NUM_PRIMARY_LENS].cost + extra_cost;
 	}
 }
 
@@ -1829,17 +1911,17 @@ lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
 		num_used_bytes += have_byte[i];
 
 	for (i = 0; i < 256; i++)
-		c->costs.main[i] = 140 - (256 - num_used_bytes) / 4;
+		c->costs.main[i].cost = 140 - (256 - num_used_bytes) / 4;
 
 	for (; i < c->num_main_syms; i++)
-		c->costs.main[i] = 170;
+		c->costs.main[i].cost = 170;
 
 	for (i = 0; i < LZX_LENCODE_NUM_SYMBOLS; i++)
-		c->costs.len[i] = 103 + (i / 4);
+		c->costs.len[i].cost = 103 + (i / 4);
 
 #if LZX_CONSIDER_ALIGNED_COSTS
 	for (i = 0; i < LZX_ALIGNEDCODE_NUM_SYMBOLS; i++)
-		c->costs.aligned[i] = LZX_NUM_ALIGNED_OFFSET_BITS * LZX_BIT_COST;
+		c->costs.aligned[i].cost = LZX_NUM_ALIGNED_OFFSET_BITS * LZX_BIT_COST;
 #endif
 
 	lzx_compute_match_costs(c);
@@ -1853,19 +1935,22 @@ lzx_update_costs(struct lzx_compressor *c)
 	const struct lzx_lens *lens = &c->codes[c->codes_index].lens;
 
 	for (i = 0; i < c->num_main_syms; i++) {
-		c->costs.main[i] = (lens->main[i] ? lens->main[i] :
-				    MAIN_CODEWORD_LIMIT) * LZX_BIT_COST;
+		c->costs.main[i].cost =
+			(lens->main[i] ? lens->main[i] :
+					 MAIN_CODEWORD_LIMIT) * LZX_BIT_COST;
 	}
 
 	for (i = 0; i < LZX_LENCODE_NUM_SYMBOLS; i++) {
-		c->costs.len[i] = (lens->len[i] ? lens->len[i] :
-				   LENGTH_CODEWORD_LIMIT) * LZX_BIT_COST;
+		c->costs.len[i].cost =
+			(lens->len[i] ? lens->len[i] :
+					LENGTH_CODEWORD_LIMIT) * LZX_BIT_COST;
 	}
 
 #if LZX_CONSIDER_ALIGNED_COSTS
 	for (i = 0; i < LZX_ALIGNEDCODE_NUM_SYMBOLS; i++) {
-		c->costs.aligned[i] = (lens->aligned[i] ? lens->aligned[i] :
-				       ALIGNED_CODEWORD_LIMIT) * LZX_BIT_COST;
+		c->costs.aligned[i].cost =
+			(lens->aligned[i] ? lens->aligned[i] :
+					    ALIGNED_CODEWORD_LIMIT) * LZX_BIT_COST;
 	}
 #endif
 
