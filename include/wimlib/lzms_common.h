@@ -11,6 +11,15 @@
 #include "wimlib/lzms_constants.h"
 #include "wimlib/types.h"
 
+#ifdef __SSE2__
+#  include <emmintrin.h>
+#endif
+
+#ifdef __AVX2__
+#  include <immintrin.h>
+#endif
+
+
 /* Offset slot tables  */
 extern const u32 lzms_offset_slot_base[LZMS_MAX_NUM_OFFSET_SYMS + 1];
 extern const u8 lzms_extra_offset_bits[LZMS_MAX_NUM_OFFSET_SYMS];
@@ -144,8 +153,40 @@ lzms_get_probability(const struct lzms_probability_entry *prob_entry)
 extern void
 lzms_init_symbol_frequencies(u32 freqs[], unsigned num_syms);
 
-extern void
-lzms_dilute_symbol_frequencies(u32 freqs[], unsigned num_syms);
+static inline void
+lzms_dilute_symbol_frequencies(u32 freqs[], unsigned num_syms)
+{
+#ifdef __AVX2__
+	const __m256i ones = _mm256_set1_epi32(1);
+	__m256i *p = (__m256i *)freqs;
+	unsigned count = num_syms / 16;
+	while (count--) {
+		p[0] = _mm256_add_epi32(_mm256_srli_epi32(p[0], 1), ones);
+		p[1] = _mm256_add_epi32(_mm256_srli_epi32(p[1], 1), ones);
+		p += 2;
+	}
+	for (unsigned sym = num_syms & ~15; sym < num_syms; sym++)
+		freqs[sym] = (freqs[sym] >> 1) + 1;
+#elif defined(__SSE2__)
+	const __m128i ones = _mm_set1_epi32(1);
+	__m128i *p = (__m128i *)freqs;
+	unsigned count = num_syms / 16;
+	while (count--) {
+		p[0] = _mm_add_epi32(_mm_srli_epi32(p[0], 1), ones);
+		p[1] = _mm_add_epi32(_mm_srli_epi32(p[1], 1), ones);
+		p[2] = _mm_add_epi32(_mm_srli_epi32(p[2], 1), ones);
+		p[3] = _mm_add_epi32(_mm_srli_epi32(p[3], 1), ones);
+		p += 4;
+	}
+	for (unsigned sym = num_syms & ~15; sym < num_syms; sym++)
+		freqs[sym] = (freqs[sym] >> 1) + 1;
+#else
+	for (unsigned sym = 0; sym < num_syms; sym++)
+		freqs[sym] = (freqs[sym] >> 1) + 1;
+#endif
+}
+
+
 
 /* Pre/post-processing  */
 extern void
