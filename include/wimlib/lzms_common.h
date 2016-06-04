@@ -130,6 +130,17 @@ lzms_get_probability(const struct lzms_probability_entry *prob_entry)
 	return prob;
 }
 
+#ifdef __AVX2__
+#  define LZMS_FREQS_ALIGNMENT 32
+#  define LZMS_FREQS_ALIGNED	_aligned_attribute(32)
+#elif defined(__SSE2__)
+#  define LZMS_FREQS_ALIGNMENT 16
+#  define LZMS_FREQS_ALIGNED	_aligned_attribute(16)
+#else
+#  define LZMS_FREQS_ALIGNMENT 4
+#  define LZMS_FREQS_ALIGNED
+#endif
+
 extern void
 lzms_init_symbol_frequencies(u32 freqs[], unsigned num_syms);
 
