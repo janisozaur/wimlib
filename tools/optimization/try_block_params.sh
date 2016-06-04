@@ -17,10 +17,11 @@ trap "rm -f \"$tmpfile\"" EXIT
 
 git checkout -f "$topdir/src/lzx_compress.c" > /dev/null
 
+BLOCK_CUTOFF=$(python -c "print(int($CUTOFF_PERCENT / 100 * $OBSERVATIONS_PER_CHECK))")
 sed -i -e	\
 "
-    s/[0-9]\+ \* stats->num_observations/$BLOCK_CUTOFF * stats->num_observations/
-    s/num_new_observations < [0-9]\+\>/num_new_observations < $OBSERVATIONS_PER_CHECK/
+    s/[0-9]\+\([ \t]*\*[ \t]*stats->num_observations\)/$BLOCK_CUTOFF\1/
+    s/\(num_new_observations[ \t]*<[ \t]*\)[0-9]\+\>/\1$OBSERVATIONS_PER_CHECK/
     s/\(#define[ \t]\+MIN_BLOCK_SIZE[ \t]\+\)[0-9]\+/\1$MIN_BLOCK_SIZE/
 " "$topdir/src/lzx_compress.c"
 
