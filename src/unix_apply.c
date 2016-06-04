@@ -209,15 +209,6 @@ unix_reuse_pathbuf(struct unix_apply_ctx *ctx)
 	ctx->which_pathbuf = (ctx->which_pathbuf - 1) % NUM_PATHBUFS;
 }
 
-/* Builds and returns the filesystem path to which to extract an unspecified
- * alias of the @inode.  This cycles through NUM_PATHBUFS different buffers.  */
-static const char *
-unix_build_inode_extraction_path(const struct wim_inode *inode,
-				 struct unix_apply_ctx *ctx)
-{
-	return unix_build_extraction_path(inode_first_extraction_dentry(inode), ctx);
-}
-
 /* Should the specified file be extracted as a directory on UNIX?  We extract
  * the file as a directory if FILE_ATTRIBUTE_DIRECTORY is set and the file does
  * not have a symlink or junction reparse point.  It *may* have a different type
@@ -297,15 +288,16 @@ unix_set_mode(int fd, const char *path, mode_t mode)
  * alias of the extracted file and uses it.
  */
 static int
-unix_set_metadata(int fd, const struct wim_inode *inode,
+unix_set_metadata(int fd, const struct wim_dentry *dentry,
 		  const char *path, struct unix_apply_ctx *ctx)
 {
+	const struct wim_inode *inode = dentry->d_inode;
 	int ret;
 	struct wimlib_unix_data unix_data;
 	bool opened = false;
 
 	if (fd < 0 && !path)
-		path = unix_build_inode_extraction_path(inode, ctx);
+		path = unix_build_extraction_path(dentry, ctx);
 
 #ifdef FAT_IOCTL_SET_ATTRIBUTES
 	bool set_attributes =
@@ -334,7 +326,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 		ret = unix_set_owner_and_group(fd, path, uid, gid);
 		if (ret) {
 			if (!path)
-				path = unix_build_inode_extraction_path(inode, ctx);
+				path = unix_build_extraction_path(dentry, ctx);
 			if (ctx->common.extract_flags &
 			    WIMLIB_EXTRACT_FLAG_STRICT_ACLS)
 			{
@@ -354,7 +346,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 			ret = unix_set_mode(fd, path, mode);
 		if (ret) {
 			if (!path)
-				path = unix_build_inode_extraction_path(inode, ctx);
+				path = unix_build_extraction_path(dentry, ctx);
 			if (ctx->common.extract_flags &
 			    WIMLIB_EXTRACT_FLAG_STRICT_ACLS)
 			{
@@ -373,7 +365,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 				  inode->i_last_write_time);
 	if (ret) {
 		if (!path)
-			path = unix_build_inode_extraction_path(inode, ctx);
+			path = unix_build_extraction_path(dentry, ctx);
 		if (ctx->common.extract_flags &
 		    WIMLIB_EXTRACT_FLAG_STRICT_TIMESTAMPS)
 		{
@@ -390,7 +382,7 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 	    errno != ENOTTY)
 	{
 		if (!path)
-			path = unix_build_inode_extraction_path(inode, ctx);
+			path = unix_build_extraction_path(dentry, ctx);
 		WARNING_WITH_ERRNO("Can't set attributes on \"%s\"", path);
 	}
 #endif
@@ -411,6 +403,9 @@ unix_create_hardlinks(const struct wim_inode *inode,
 {
 	const struct wim_dentry *dentry;
 	const char *newpath;
+
+	if (!ctx->common.supported_features.hard_links)
+		return 0;
 
 	inode_for_each_extraction_alias(dentry, inode) {
 		if (dentry == first_dentry)
@@ -468,7 +463,8 @@ unix_extract_if_empty_file(const struct wim_dentry *dentry,
 	inode = dentry->d_inode;
 
 	/* Extract all aliases only when the "first" comes up.  */
-	if (dentry != inode_first_extraction_dentry(inode))
+	if (ctx->common.supported_features.hard_links &&
+	    dentry != inode_first_extraction_dentry(inode))
 		return 0;
 
 	/* Is this a directory, a symbolic link, or any type of nonempty file?
@@ -499,7 +495,7 @@ unix_extract_if_empty_file(const struct wim_dentry *dentry,
 		}
 		/* On special files, we can set timestamps immediately because
 		 * we don't need to write any data to them.  */
-		ret = unix_set_metadata(-1, inode, path, ctx);
+		ret = unix_set_metadata(-1, dentry, path, ctx);
 	} else {
 		int fd;
 
@@ -514,7 +510,7 @@ unix_extract_if_empty_file(const struct wim_dentry *dentry,
 		}
 		/* On empty files, we can set timestamps immediately because we
 		 * don't need to write any data to them.  */
-		ret = unix_set_metadata(fd, inode, path, ctx);
+		ret = unix_set_metadata(fd, dentry, path, ctx);
 		if (close(fd) && !ret) {
 			ERROR_WITH_ERRNO("Error closing \"%s\"", path);
 			ret = WIMLIB_ERR_WRITE;
@@ -551,7 +547,8 @@ unix_create_dirs_and_empty_files(const struct list_head *dentry_list,
 }
 
 static void
-unix_count_dentries(const struct list_head *dentry_list,
+unix_count_dentries(const struct unix_apply_ctx *ctx,
+		    const struct list_head *dentry_list,
 		    u64 *dir_count_ret, u64 *empty_file_count_ret)
 {
 	const struct wim_dentry *dentry;
@@ -564,7 +561,8 @@ unix_count_dentries(const struct list_head *dentry_list,
 
 		if (should_extract_as_directory(inode))
 			dir_count++;
-		else if ((dentry == inode_first_extraction_dentry(inode)) &&
+		else if ((dentry == inode_first_extraction_dentry(inode) ||
+			  !ctx->common.supported_features.hard_links) &&
 			 !inode_is_symlink(inode) &&
 			 !inode_get_blob_for_unnamed_data_stream_resolved(inode))
 			empty_file_count++;
@@ -575,7 +573,7 @@ unix_count_dentries(const struct list_head *dentry_list,
 }
 
 static int
-unix_create_symlink(const struct wim_inode *inode, const char *path,
+unix_create_symlink(const struct wim_dentry *dentry, const char *path,
 		    size_t rpdatalen, struct unix_apply_ctx *ctx)
 {
 	char target[REPARSE_POINT_MAX_SIZE];
@@ -585,7 +583,7 @@ unix_create_symlink(const struct wim_inode *inode, const char *path,
 	blob_set_is_located_in_attached_buffer(&blob_override,
 					       ctx->reparse_data, rpdatalen);
 
-	ret = wim_inode_readlink(inode, target, sizeof(target) - 1,
+	ret = wim_inode_readlink(dentry->d_inode, target, sizeof(target) - 1,
 				 &blob_override,
 				 ctx->target_abspath,
 				 ctx->target_abspath_nchars);
@@ -614,12 +612,11 @@ unix_cleanup_open_fds(struct unix_apply_ctx *ctx, unsigned offset)
 
 static int
 unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
-				 const struct wim_inode *inode,
+				 const struct wim_dentry *dentry,
 				 const struct wim_inode_stream *strm,
 				 struct unix_apply_ctx *ctx)
 {
-	const struct wim_dentry *first_dentry;
-	const char *first_path;
+	const char *path;
 	int fd;
 
 	if (unlikely(strm->stream_type == STREAM_TYPE_REPARSE_POINT)) {
@@ -628,7 +625,7 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 		if (blob->size > REPARSE_DATA_MAX_SIZE) {
 			ERROR_WITH_ERRNO("Reparse data of \"%s\" has size "
 					 "%"PRIu64" bytes (exceeds %u bytes)",
-					 inode_any_full_path(inode),
+					 unix_build_extraction_path(dentry, ctx),
 					 blob->size, REPARSE_DATA_MAX_SIZE);
 			return WIMLIB_ERR_INVALID_REPARSE_DATA;
 		}
@@ -643,18 +640,17 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 	/* This should be ensured by extract_blob_list()  */
 	wimlib_assert(ctx->num_open_fds < MAX_OPEN_FILES);
 
-	first_dentry = inode_first_extraction_dentry(inode);
-	first_path = unix_build_extraction_path(first_dentry, ctx);
+	path = unix_build_extraction_path(dentry, ctx);
 retry_create:
-	fd = open(first_path, O_EXCL | O_CREAT | O_WRONLY | O_NOFOLLOW, 0644);
+	fd = open(path, O_EXCL | O_CREAT | O_WRONLY | O_NOFOLLOW, 0644);
 	if (fd < 0) {
-		if (errno == EEXIST && !unlink(first_path))
+		if (errno == EEXIST && !unlink(path))
 			goto retry_create;
-		ERROR_WITH_ERRNO("Can't create regular file \"%s\"", first_path);
+		ERROR_WITH_ERRNO("Can't create regular file \"%s\"", path);
 		return WIMLIB_ERR_OPEN;
 	}
 	filedes_init(&ctx->open_fds[ctx->num_open_fds++], fd);
-	return unix_create_hardlinks(inode, first_dentry, first_path, ctx);
+	return unix_create_hardlinks(dentry->d_inode, dentry, path, ctx);
 }
 
 /* Called when starting to read a blob for extraction  */
@@ -665,14 +661,20 @@ unix_begin_extract_blob(struct blob_descriptor *blob, void *_ctx)
 	const struct blob_extraction_target *targets = blob_extraction_targets(blob);
 
 	for (u32 i = 0; i < blob->out_refcnt; i++) {
-		int ret = unix_begin_extract_blob_instance(blob,
-							   targets[i].inode,
-							   targets[i].stream,
-							   ctx);
-		if (ret) {
-			ctx->reparse_ptr = NULL;
-			unix_cleanup_open_fds(ctx, 0);
-			return ret;
+		const struct wim_inode *inode = targets[i].inode;
+		const struct wim_inode_stream *strm = targets[i].stream;
+		const struct wim_dentry *dentry;
+
+		inode_for_each_extraction_alias(dentry, inode) {
+			int ret = unix_begin_extract_blob_instance(blob, dentry,
+								   strm, ctx);
+			if (ret) {
+				ctx->reparse_ptr = NULL;
+				unix_cleanup_open_fds(ctx, 0);
+				return ret;
+			}
+			if (ctx->common.supported_features.hard_links)
+				break;
 		}
 	}
 	return 0;
@@ -714,43 +716,49 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 	}
 
 	j = 0;
-	ret = 0;
 	for (u32 i = 0; i < blob->out_refcnt; i++) {
-		struct wim_inode *inode = targets[i].inode;
+		const struct wim_inode *inode = targets[i].inode;
+		const struct wim_dentry *dentry;
 
-		if (inode_is_symlink(inode)) {
-			/* We finally have the symlink data, so we can create
-			 * the symlink.  */
-			const char *path;
+		inode_for_each_extraction_alias(dentry, inode) {
+			if (inode_is_symlink(inode)) {
+				/* We finally have the symlink data, so we can create
+				 * the symlink.  */
+				const char *path;
 
-			path = unix_build_inode_extraction_path(inode, ctx);
-			ret = unix_create_symlink(inode, path, blob->size, ctx);
-			if (ret) {
-				ERROR_WITH_ERRNO("Can't create symbolic link "
-						 "\"%s\"", path);
-				break;
+				path = unix_build_extraction_path(dentry, ctx);
+				ret = unix_create_symlink(dentry, path, blob->size, ctx);
+				if (ret) {
+					ERROR_WITH_ERRNO("Can't create symbolic link "
+							 "\"%s\"", path);
+					goto out;
+				}
+				ret = unix_set_metadata(-1, dentry, path, ctx);
+				if (ret)
+					goto out;
+			} else {
+				/* Set metadata on regular file just before closing it.
+				 */
+				struct filedes *fd = &ctx->open_fds[j];
+
+				ret = unix_set_metadata(fd->fd, dentry, NULL, ctx);
+				if (ret)
+					goto out;
+
+				if (filedes_close(fd)) {
+					ERROR_WITH_ERRNO("Error closing \"%s\"",
+							 unix_build_extraction_path(dentry, ctx));
+					ret = WIMLIB_ERR_WRITE;
+					goto out;
+				}
+				j++;
 			}
-			ret = unix_set_metadata(-1, inode, path, ctx);
-			if (ret)
+			if (ctx->common.supported_features.hard_links)
 				break;
-		} else {
-			/* Set metadata on regular file just before closing it.
-			 */
-			struct filedes *fd = &ctx->open_fds[j];
-
-			ret = unix_set_metadata(fd->fd, inode, NULL, ctx);
-			if (ret)
-				break;
-
-			if (filedes_close(fd)) {
-				ERROR_WITH_ERRNO("Error closing \"%s\"",
-						 unix_build_inode_extraction_path(inode, ctx));
-				ret = WIMLIB_ERR_WRITE;
-				break;
-			}
-			j++;
 		}
 	}
+	ret = 0;
+out:
 	unix_cleanup_open_fds(ctx, j);
 	return ret;
 }
@@ -763,7 +771,7 @@ unix_set_dir_metadata(struct list_head *dentry_list, struct unix_apply_ctx *ctx)
 
 	list_for_each_entry_reverse(dentry, dentry_list, d_extraction_list_node) {
 		if (should_extract_as_directory(dentry->d_inode)) {
-			ret = unix_set_metadata(-1, dentry->d_inode, NULL, ctx);
+			ret = unix_set_metadata(-1, dentry, NULL, ctx);
 			if (ret)
 				return ret;
 			ret = report_file_metadata_applied(&ctx->common);
@@ -804,7 +812,7 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 	 * exist.  Empty files are needed because they don't have
 	 * representatives in the blob list.  */
 
-	unix_count_dentries(dentry_list, &dir_count, &empty_file_count);
+	unix_count_dentries(ctx, dentry_list, &dir_count, &empty_file_count);
 
 	ret = start_file_structure_phase(&ctx->common, dir_count + empty_file_count);
 	if (ret)
