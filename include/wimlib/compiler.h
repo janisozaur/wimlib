@@ -127,6 +127,16 @@
 #endif
 #define CPU_IS_LITTLE_ENDIAN (!CPU_IS_BIG_ENDIAN)
 
+/* Word size definition */
+#ifdef __SIZEOF_SIZE_T__
+#  define CPU_IS_64BIT (__SIZEOF_SIZE_T__ == 8)
+#elif defined(HAVE_CONFIG_H)
+#  include "config.h"
+#  ifdef SIZEOF_SIZE_T
+#    define CPU_IS_64BIT (SIZEOF_SIZE_T == 8)
+#  endif
+#endif
+
 /* UNALIGNED_ACCESS_IS_FAST should be defined to 1 if unaligned memory accesses
  * can be performed efficiently on the target platform.  */
 #if defined(__x86_64__) || defined(__i386__) || defined(__ARM_FEATURE_UNALIGNED)
