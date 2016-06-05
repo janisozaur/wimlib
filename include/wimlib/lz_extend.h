@@ -57,16 +57,6 @@ lz_extend(const u8 * const strptr, const u8 * const matchptr,
 		"  jc 2f                                     \n"
 		"  add $0x10, %[len]                         \n"
 
-		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
-		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
-		"  jc 2f                                     \n"
-		"  add $0x10, %[len]                         \n"
-
-		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
-		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
-		"  jc 2f                                     \n"
-		"  add $0x10, %[len]                         \n"
-
 		"  cmp $257, %[len]                          \n"
 		"  jb 1b                                     \n"
 		"  xor %%rcx, %%rcx                          \n"
