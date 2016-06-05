@@ -25,7 +25,7 @@
 #include "wimlib/bitops.h"
 #include "wimlib/unaligned.h"
 
-#include <smmintrin.h>
+#include <immintrin.h>
 
 /* Return the number of bytes at @matchptr that match the bytes at @strptr, up
  * to a maximum of @max_len.  Initially, @start_len bytes are matched.  */
@@ -49,22 +49,29 @@ lz_extend(const u8 * const strptr, const u8 * const matchptr,
 #else
 
 	u64 len = start_len;
+	const __m256i ones = _mm256_set1_epi8(0xFF);
 
 	__asm__(
+		"jmp 1f                                     \n"
+		"0:                                           \n"
+		"  add $0x20, %[len]                         \n"
 		"1:                                          \n"
-		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
-		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
-		"  jc 2f                                     \n"
-		"  add $0x10, %[len]                         \n"
-
+		"  vmovdqu 0x0(%[matchptr],%[len],1), %%ymm0    \n"
+		"  vmovdqu 0x0(%[strptr],%[len],1), %%ymm1    \n"
+		"  vpcmpeqb %%ymm0, %%ymm1, %%ymm1\n"
+		"  vpxor %%ymm1, %[ones], %%ymm1\n"
+		"  vpmovmskb %%ymm1, %%ecx\n"
+		"  bsf %%ecx, %%ecx\n"
+		"  jz 0b\n"
+		"  jmp 2f                                    \n"
+		/*"  add %%cax, %[len]                         \n"*/
 		"  cmp $257, %[len]                          \n"
 		"  jb 1b                                     \n"
-		"  xor %%rcx, %%rcx                          \n"
 		"2:                                          \n"
 		"  add %%rcx, %[len]                         \n"
 		: [len] "+r" (len)
-		: "a" (16), "d" (16), [strptr] "r" (strptr), [matchptr] "r" (matchptr)
-		: "rcx", "cc", "xmm0", "memory"
+		: [strptr] "r" (strptr), [matchptr] "r" (matchptr), [ones] "x" (ones)
+		: "rcx", "cc", "ymm0", "ymm1", "memory"
 	       );
 
 
