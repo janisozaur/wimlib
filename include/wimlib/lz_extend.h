@@ -21,6 +21,7 @@
 #ifndef _WIMLIB_LZ_EXTEND_H
 #define _WIMLIB_LZ_EXTEND_H
 
+#include "wimlib/assert.h"
 #include "wimlib/bitops.h"
 #include "wimlib/unaligned.h"
 
@@ -28,9 +29,9 @@
 
 /* Return the number of bytes at @matchptr that match the bytes at @strptr, up
  * to a maximum of @max_len.  Initially, @start_len bytes are matched.  */
-static inline u32
+static inline machine_word_t
 lz_extend(const u8 * const strptr, const u8 * const matchptr,
-	  const u32 start_len, const u32 max_len)
+	  const machine_word_t start_len, const machine_word_t max_len)
 {
 #if 0
 	u32 len = start_len;
@@ -48,22 +49,27 @@ lz_extend(const u8 * const strptr, const u8 * const matchptr,
 #else
 
 	u64 len = start_len;
-	u8 saved = strptr[max_len];
-	((u8 *)strptr)[max_len] = matchptr[max_len] + 1;
 
 	__asm__(
-		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
-		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
-		"  jc 2f                                     \n"
 		"1:                                          \n"
-		"  add $0x10, %[len]                         \n"
 		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
 		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
 		"  jc 2f                                     \n"
 		"  add $0x10, %[len]                         \n"
+
 		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
 		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
-		"  jnc 1b                                    \n"
+		"  jc 2f                                     \n"
+		"  add $0x10, %[len]                         \n"
+
+		"  movdqu 0x0(%[strptr],%[len],1), %%xmm0    \n"
+		"  pcmpestri $0x18, 0x0(%[matchptr],%[len],1), %%xmm0    \n"
+		"  jc 2f                                     \n"
+		"  add $0x10, %[len]                         \n"
+
+		"  cmp $257, %[len]                          \n"
+		"  jb 1b                                     \n"
+		"  xor %%rcx, %%rcx                          \n"
 		"2:                                          \n"
 		"  add %%rcx, %[len]                         \n"
 		: [len] "+r" (len)
@@ -72,9 +78,7 @@ lz_extend(const u8 * const strptr, const u8 * const matchptr,
 	       );
 
 
-	((u8 *)strptr)[max_len] = saved;
-
-	return len;
+	return min(len, max_len);
 #endif
 }
 

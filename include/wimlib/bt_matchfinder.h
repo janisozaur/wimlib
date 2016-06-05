@@ -145,35 +145,35 @@ static inline struct lz_match *
 TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * const restrict mf,
 					   const u8 * const restrict in_begin,
 					   const ptrdiff_t cur_pos,
-					   const u32 max_len,
-					   const u32 nice_len,
-					   const u32 max_search_depth,
+					   const machine_word_t max_len,
+					   const machine_word_t nice_len,
+					   const machine_word_t max_search_depth,
 					   u32 next_hashes[const restrict static 2],
 					   u32 * const restrict best_len_ret,
 					   struct lz_match * restrict lz_matchptr,
 					   const bool record_matches)
 {
 	const u8 *in_next = in_begin + cur_pos;
-	u32 depth_remaining = max_search_depth;
-	u32 next_seq4;
-	u32 next_seq3;
-	u32 hash3;
-	u32 hash4;
+	machine_word_t depth_remaining = max_search_depth;
+	machine_word_t next_seq4;
+	machine_word_t next_seq3;
+	machine_word_t hash3;
+	machine_word_t hash4;
 #ifdef BT_MATCHFINDER_HASH2_ORDER
-	u16 seq2;
-	u32 hash2;
+	machine_word_t seq2;
+	machine_word_t hash2;
 #endif
 	STATIC_ASSERT(BT_MATCHFINDER_HASH3_WAYS >= 1 &&
 		      BT_MATCHFINDER_HASH3_WAYS <= 2);
-	u32 cur_node;
+	machine_word_t cur_node;
 #if BT_MATCHFINDER_HASH3_WAYS >= 2
-	u32 cur_node_2;
+	machine_word_t cur_node_2;
 #endif
 	const u8 *matchptr;
 	mf_pos_t *pending_lt_ptr, *pending_gt_ptr;
-	u32 best_lt_len, best_gt_len;
-	u32 len;
-	u32 best_len = 3;
+	machine_word_t best_lt_len, best_gt_len;
+	machine_word_t len;
+	machine_word_t best_len = 3;
 
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_seq3 = loaded_u32_to_u24(next_seq4);
@@ -328,9 +328,9 @@ static inline struct lz_match *
 TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      const u8 *in_begin,
 				      ptrdiff_t cur_pos,
-				      u32 max_len,
-				      u32 nice_len,
-				      u32 max_search_depth,
+				      machine_word_t max_len,
+				      machine_word_t nice_len,
+				      machine_word_t max_search_depth,
 				      u32 next_hashes[static 2],
 				      u32 *best_len_ret,
 				      struct lz_match *lz_matchptr)
@@ -357,9 +357,9 @@ static inline void
 TEMPLATED(bt_matchfinder_skip_position)(struct TEMPLATED(bt_matchfinder) *mf,
 					const u8 *in_begin,
 					ptrdiff_t cur_pos,
-					u32 max_len,
-					u32 nice_len,
-					u32 max_search_depth,
+					machine_word_t max_len,
+					machine_word_t nice_len,
+					machine_word_t max_search_depth,
 					u32 next_hashes[static 2])
 {
 	u32 best_len;

@@ -2506,10 +2506,10 @@ lzx_create_compressor(size_t max_bufsize, unsigned compression_level,
 	c->window_order = window_order;
 
 	if (!c->destructive) {
-		c->in_buffer = MALLOC(max_bufsize + LZX_MAX_MATCH_LEN);
+		c->in_buffer = MALLOC(max_bufsize + LZX_MAX_MATCH_LEN*2);
 		if (!c->in_buffer)
 			goto oom1;
-		randomize_byte_array(&c->in_buffer[max_bufsize], LZX_MAX_MATCH_LEN);
+		randomize_byte_array(&c->in_buffer[max_bufsize], LZX_MAX_MATCH_LEN*2);
 	}
 
 	if (compression_level <= LZX_MAX_FAST_LEVEL) {
