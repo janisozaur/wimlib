@@ -2009,102 +2009,106 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 		const u8 * const in_block_begin = in_next;
 		const u8 * const in_max_block_end =
 			in_next + min(SOFT_MAX_BLOCK_SIZE, in_end - in_next);
+		struct lz_match *cache_ptr = c->match_cache;
+		const u8 *next_search_pos = in_next;
 		const u8 *next_observation = in_next;
+		const u8 *next_pause_point = min(in_next + MIN_BLOCK_SIZE,
+						 in_max_block_end - LZX_MAX_MATCH_LEN - 1);
 
 		init_block_split_stats(&c->split_stats);
 
 		/* Run the block through the matchfinder and cache the matches. */
-		struct lz_match *cache_ptr = c->match_cache;
+	enter_mf_loop:
 		do {
-			struct lz_match *lz_matchptr;
-			u32 best_len;
+			if (in_next >= next_search_pos) {
+				struct lz_match *lz_matchptr;
+				u32 best_len;
 
-			/* If approaching the end of the input buffer, adjust
-			 * 'max_len' and 'nice_len' accordingly.  */
-			if (unlikely(max_len > in_end - in_next)) {
-				max_len = in_end - in_next;
-				nice_len = min(max_len, nice_len);
-				if (unlikely(max_len <
-					     BT_MATCHFINDER_REQUIRED_NBYTES))
-				{
-					in_next++;
-					cache_ptr->length = 0;
-					cache_ptr++;
-					continue;
-				}
-			}
+				lz_matchptr = CALL_BT_MF(is_16_bit, c,
+							 bt_matchfinder_get_matches,
+							 in_begin,
+							 in_next - in_begin,
+							 max_len,
+							 nice_len,
+							 c->max_search_depth,
+							 next_hashes,
+							 &best_len,
+							 cache_ptr + 1);
+				cache_ptr->length = lz_matchptr - (cache_ptr + 1);
+				cache_ptr = lz_matchptr;
 
-			/* Check for matches.  */
-			lz_matchptr = CALL_BT_MF(is_16_bit, c,
-						 bt_matchfinder_get_matches,
-						 in_begin,
-						 in_next - in_begin,
-						 max_len,
-						 nice_len,
-						 c->max_search_depth,
-						 next_hashes,
-						 &best_len,
-						 cache_ptr + 1);
-
-			cache_ptr->length = lz_matchptr - (cache_ptr + 1);
-			cache_ptr = lz_matchptr;
-
-			if (in_next >= next_observation) {
-				best_len = cache_ptr[-1].length;
-				if (best_len) {
-					observe_match(&c->split_stats, best_len);
-					next_observation = in_next + best_len;
-				} else {
-					observe_literal(&c->split_stats, *in_next);
-					next_observation = in_next + 1;
-				}
-			}
-
-			in_next++;
-
-			/*
-			 * If there was a very long match found, then don't
-			 * cache any matches for the bytes covered by that
-			 * match.  This avoids degenerate behavior when
-			 * compressing highly redundant data, where the number
-			 * of matches can be very large.
-			 *
-			 * This heuristic doesn't actually hurt the compression
-			 * ratio very much.  If there's a long match, then the
-			 * data must be highly compressible, so it doesn't
-			 * matter as much what we do.
-			 */
-			if (best_len >= nice_len) {
-				--best_len;
-				do {
-					if (unlikely(max_len > in_end - in_next)) {
-						max_len = in_end - in_next;
-						nice_len = min(max_len, nice_len);
-						if (unlikely(max_len <
-							     BT_MATCHFINDER_REQUIRED_NBYTES))
-						{
-							in_next++;
-							cache_ptr->length = 0;
-							cache_ptr++;
-							continue;
-						}
+				if (in_next >= next_observation) {
+					best_len = cache_ptr[-1].length;
+					if (best_len) {
+						observe_match(&c->split_stats, best_len);
+						next_observation = in_next + best_len;
+					} else {
+						observe_literal(&c->split_stats, *in_next);
+						next_observation = in_next + 1;
 					}
-					CALL_BT_MF(is_16_bit, c,
-						   bt_matchfinder_skip_position,
-						   in_begin,
-						   in_next - in_begin,
-						   nice_len,
-						   c->max_search_depth,
-						   next_hashes);
+				}
+				/*
+				 * If there was a very long match found, then don't
+				 * cache any matches for the bytes covered by that
+				 * match.  This avoids degenerate behavior when
+				 * compressing highly redundant data, where the number
+				 * of matches can be very large.
+				 *
+				 * This heuristic doesn't actually hurt the compression
+				 * ratio very much.  If there's a long match, then the
+				 * data must be highly compressible, so it doesn't
+				 * matter as much what we do.
+				 */
+				if (best_len >= nice_len) {
+					next_search_pos = in_next + best_len;
+					next_observation = next_search_pos;
+				}
+			} else {
+				CALL_BT_MF(is_16_bit, c,
+					   bt_matchfinder_skip_position,
+					   in_begin,
+					   in_next - in_begin,
+					   nice_len,
+					   c->max_search_depth,
+					   next_hashes);
+				cache_ptr->length = 0;
+				cache_ptr++;
+			}
+		} while (++in_next < next_pause_point &&
+			 likely(cache_ptr < &c->match_cache[LZX_CACHE_LENGTH]));
+
+		if (unlikely(cache_ptr >= &c->match_cache[LZX_CACHE_LENGTH]))
+			goto flush_block;
+
+		if (max_len > in_end - in_next) {
+			max_len = in_end - in_next;
+			nice_len = min(max_len, nice_len);
+			if (unlikely(max_len < BT_MATCHFINDER_REQUIRED_NBYTES)) {
+				while (in_next != in_end) {
 					in_next++;
 					cache_ptr->length = 0;
 					cache_ptr++;
-				} while (--best_len);
+				}
 			}
-		} while (in_next < in_max_block_end &&
-			 likely(cache_ptr < &c->match_cache[LZX_CACHE_LENGTH]) &&
-			 !should_end_block(&c->split_stats, in_block_begin, in_next, in_end));
+		}
 
+		if (in_next >= in_max_block_end)
+			goto flush_block;
+
+		if (c->split_stats.num_new_observations >= NUM_OBSERVATIONS_PER_BLOCK_CHECK) {
+			if (do_end_block_check(&c->split_stats, in_next - in_block_begin))
+				goto flush_block;
+			if (in_max_block_end - in_next <= MIN_BLOCK_SIZE)
+				next_observation = in_max_block_end;
+		}
+
+		next_pause_point = min(in_next +
+				       NUM_OBSERVATIONS_PER_BLOCK_CHECK * 2 -
+				       c->split_stats.num_new_observations,
+				       in_max_block_end - LZX_MAX_MATCH_LEN - 1);
+		goto enter_mf_loop;
+
+	flush_block:
 		/* We've finished running the block through the matchfinder.
 		 * Now choose a match/literal sequence and write the block.  */
 
