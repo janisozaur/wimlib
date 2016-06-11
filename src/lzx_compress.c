@@ -5,7 +5,7 @@
  */
 
 /*
- * Copyright (C) 2012, 2013, 2014, 2015 Eric Biggers
+ * Copyright (C) 2012-2016 Eric Biggers
  *
  * This file is free software; you can redistribute it and/or modify it under
  * the terms of the GNU Lesser General Public License as published by the Free
@@ -65,33 +65,41 @@
 #endif
 
 /*
- * Start a new LZX block (with new Huffman codes) after this many bytes.
- *
- * Note: actual block sizes may slightly exceed this value.
- *
- * TODO: recursive splitting and cost evaluation might be good for an extremely
- * high compression mode, but otherwise it is almost always far too slow for how
- * much it helps.  Perhaps some sort of heuristic would be useful?
+ * The compressor always chooses a block of at least MIN_BLOCK_SIZE bytes,
+ * except if the last block has to be shorter.
  */
-#define LZX_DIV_BLOCK_SIZE	32768
+#define MIN_BLOCK_SIZE		6500
 
 /*
- * LZX_CACHE_PER_POS is the number of lz_match structures to reserve in the
- * match cache for each byte position.  This value should be high enough so that
- * nearly the time, all matches found in a given block can fit in the match
- * cache.  However, fallback behavior (immediately terminating the block) on
- * cache overflow is still required.
+ * The compressor attempts to end blocks after SOFT_MAX_BLOCK_SIZE bytes, but
+ * the final size might be larger due to matches extending beyond the end of the
+ * block.  Specifically:
+ *
+ *  - The greedy parser may choose an arbitrarily long match starting at the
+ *    SOFT_MAX_BLOCK_SIZE'th byte.
+ *
+ *  - The lazy parser may choose a sequence of literals starting at the
+ *    SOFT_MAX_BLOCK_SIZE'th byte when it sees a sequence of increasing good
+ *    matches.  The final match may be of arbitrary length.  The length of the
+ *    literal sequence is approximately limited by the "nice match length"
+ *    parameter.
  */
-#define LZX_CACHE_PER_POS	7
+#define SOFT_MAX_BLOCK_SIZE	100000
+
+/*
+ * The number of observed matches or literals that represents sufficient data to
+ * decide whether the current block should be terminated or not.
+ */
+#define NUM_OBSERVATIONS_PER_BLOCK_CHECK	500
 
 /*
  * LZX_CACHE_LENGTH is the number of lz_match structures in the match cache,
- * excluding the extra "overflow" entries.  The per-position multiplier is '1 +
- * LZX_CACHE_PER_POS' instead of 'LZX_CACHE_PER_POS' because there is an
- * overhead of one lz_match per position, used to hold the match count at that
- * position.
+ * excluding the extra "overflow" entries.  This value should be high enough so
+ * that nearly the time, all matches found in a given block can fit in the match
+ * cache.  However, fallback behavior (immediately terminating the block) on
+ * cache overflow is still required.
  */
-#define LZX_CACHE_LENGTH	(LZX_DIV_BLOCK_SIZE * (1 + LZX_CACHE_PER_POS))
+#define LZX_CACHE_LENGTH	(SOFT_MAX_BLOCK_SIZE * 5)
 
 /*
  * LZX_MAX_MATCHES_PER_POS is an upper bound on the number of matches that can
@@ -212,6 +220,17 @@ struct lzx_freqs {
 	u32 main[LZX_MAINCODE_MAX_NUM_SYMBOLS];
 	u32 len[LZX_LENCODE_NUM_SYMBOLS];
 	u32 aligned[LZX_ALIGNEDCODE_NUM_SYMBOLS];
+};
+
+/* Block split statistics.  See "Block splitting algorithm" below. */
+#define NUM_LITERAL_OBSERVATION_TYPES 8
+#define NUM_MATCH_OBSERVATION_TYPES 2
+#define NUM_OBSERVATION_TYPES (NUM_LITERAL_OBSERVATION_TYPES + NUM_MATCH_OBSERVATION_TYPES)
+struct block_split_stats {
+	u32 new_observations[NUM_OBSERVATION_TYPES];
+	u32 observations[NUM_OBSERVATION_TYPES];
+	u32 num_new_observations;
+	u32 num_observations;
 };
 
 /*
@@ -394,6 +413,9 @@ struct lzx_compressor {
 	/* The Huffman symbol frequency counters for the current block.  */
 	struct lzx_freqs freqs;
 
+	/* Block split statistics.  */
+	struct block_split_stats split_stats;
+
 	/* The Huffman codes for the current and previous blocks.  The one with
 	 * index 'codes_index' is for the current block, and the other one is
 	 * for the previous block.  */
@@ -405,7 +427,7 @@ struct lzx_compressor {
 	 * number of matches that can ever be chosen for a single block, plus
 	 * one for the special entry at the end.  */
 	struct lzx_sequence chosen_sequences[
-		       DIV_ROUND_UP(LZX_DIV_BLOCK_SIZE, LZX_MIN_MATCH_LEN) + 1];
+		       DIV_ROUND_UP(SOFT_MAX_BLOCK_SIZE, LZX_MIN_MATCH_LEN) + 1];
 
 	/* Tables for mapping adjusted offsets to offset slots  */
 
@@ -428,24 +450,18 @@ struct lzx_compressor {
 		/* Data for near-optimal parsing  */
 		struct {
 			/*
-			 * The graph nodes for the current block.
+			 * Array of nodes, one per position, for running the
+			 * minimum-cost path algorithm.
 			 *
-			 * We need at least 'LZX_DIV_BLOCK_SIZE +
-			 * LZX_MAX_MATCH_LEN - 1' nodes because that is the
-			 * maximum block size that may be used.  Add 1 because
-			 * we need a node to represent end-of-block.
-			 *
-			 * It is possible that nodes past end-of-block are
-			 * accessed during match consideration, but this can
-			 * only occur if the block was truncated at
-			 * LZX_DIV_BLOCK_SIZE.  So the same bound still applies.
-			 * Note that since nodes past the end of the block will
-			 * never actually have an effect on the items that are
-			 * chosen for the block, it makes no difference what
-			 * their costs are initialized to (if anything).
+			 * This array must be large enough to accommodate the
+			 * worst-case number of nodes, which occurs if we find a
+			 * match of length LZX_MAX_MATCH_LEN at position
+			 * SOFT_MAX_BLOCK_SIZE - 1, producing a block of length
+			 * SOFT_MAX_BLOCK_SIZE - 1 + LZX_MAX_MATCH_LEN.  Add one
+			 * for the end-of-block node.
 			 */
-			struct lzx_optimum_node optimum_nodes[LZX_DIV_BLOCK_SIZE +
-							      LZX_MAX_MATCH_LEN - 1 + 1];
+			struct lzx_optimum_node optimum_nodes[SOFT_MAX_BLOCK_SIZE - 1 +
+							      LZX_MAX_MATCH_LEN + 1];
 
 			/* The cost model for the current block  */
 			struct lzx_costs costs;
@@ -1227,6 +1243,121 @@ lzx_finish_sequence(struct lzx_sequence *last_seq, u32 litrunlen)
 	last_seq->adjusted_offset_and_match_hdr = 0x80000000;
 }
 
+/******************************************************************************/
+
+/*
+ * Block splitting algorithm.  The problem is to decide when it is worthwhile to
+ * start a new block with new entropy codes.  There is a theoretically optimal
+ * solution: recursively consider every possible block split, considering the
+ * exact cost of each block, and choose the minimum cost approach.  But this is
+ * far too slow.  Instead, as an approximation, we can count symbols and after
+ * every N symbols, compare the expected distribution of symbols based on the
+ * previous data with the actual distribution.  If they differ "by enough", then
+ * start a new block.
+ *
+ * As an optimization and heuristic, we don't distinguish between every symbol
+ * but rather we combine many symbols into a single "observation type".  For
+ * literals we only look at the high bits and low bits, and for matches we only
+ * look at whether the match is long or not.  The assumption is that for typical
+ * "real" data, places that are good block boundaries will tend to be noticable
+ * based only on changes in these aggregate frequencies, without looking for
+ * subtle differences in individual symbols.  For example, a change from ASCII
+ * bytes to non-ASCII bytes, or from few matches (generally less compressible)
+ * to many matches (generally more compressible), would be easily noticed based
+ * on the aggregates.
+ *
+ * For determining whether the frequency distributions are "different enough" to
+ * start a new block, the simply heuristic of splitting when the sum of absolute
+ * differences exceeds a constant seems to be good enough.  We also add a number
+ * proportional to the block size so that the algorithm is more likely to end
+ * large blocks than small blocks.  This reflects the general expectation that
+ * it will become increasingly beneficial to start a new block as the current
+ * blocks grows larger.
+ *
+ * Finally, for an approximation, it is not strictly necessary that the exact
+ * symbols being used are considered.  With "near-optimal parsing", for example,
+ * the actual symbols that will be used are unknown until after the block
+ * boundary is chosen and the block has been optimized.  Since the final choices
+ * cannot be used, we can use preliminary "greedy" choices instead.
+ */
+
+/* Initialize the block split statistics when starting a new block. */
+static void
+init_block_split_stats(struct block_split_stats *stats)
+{
+	for (int i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+		stats->new_observations[i] = 0;
+		stats->observations[i] = 0;
+	}
+	stats->num_new_observations = 0;
+	stats->num_observations = 0;
+}
+
+/* Literal observation.  Heuristic: use the top 2 bits and low 1 bits of the
+ * literal, for 8 possible literal observation types.  */
+static inline void
+observe_literal(struct block_split_stats *stats, u8 lit)
+{
+	stats->new_observations[((lit >> 5) & 0x6) | (lit & 1)]++;
+	stats->num_new_observations++;
+}
+
+/* Match observation.  Heuristic: use one observation type for "short match" and
+ * one observation type for "long match".  */
+static inline void
+observe_match(struct block_split_stats *stats, unsigned length)
+{
+	stats->new_observations[NUM_LITERAL_OBSERVATION_TYPES + (length >= 5)]++;
+	stats->num_new_observations++;
+}
+
+static bool
+do_end_block_check(struct block_split_stats *stats, u32 block_size)
+{
+	if (stats->num_observations > 0) {
+
+		/* Note: to avoid slow divisions, we do not divide by
+		 * 'num_observations', but rather do all math with the numbers
+		 * multiplied by 'num_observations'.  */
+		u32 total_delta = 0;
+		for (int i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+			u32 expected = stats->observations[i] * stats->num_new_observations;
+			u32 actual = stats->new_observations[i] * stats->num_observations;
+			u32 delta = (actual > expected) ? actual - expected :
+							  expected - actual;
+			total_delta += delta;
+		}
+
+		/* Ready to end the block? */
+		if (total_delta + (block_size / 1024) * stats->num_observations >=
+		    stats->num_new_observations * 51 / 64 * stats->num_observations)
+			return true;
+	}
+
+	for (int i = 0; i < NUM_OBSERVATION_TYPES; i++) {
+		stats->num_observations += stats->new_observations[i];
+		stats->observations[i] += stats->new_observations[i];
+		stats->new_observations[i] = 0;
+	}
+	stats->num_new_observations = 0;
+	return false;
+}
+
+static inline bool
+should_end_block(struct block_split_stats *stats,
+		 const u8 *in_block_begin, const u8 *in_next, const u8 *in_end)
+{
+	/* Ready to check block split statistics? */
+	if (stats->num_new_observations < NUM_OBSERVATIONS_PER_BLOCK_CHECK ||
+	    in_next - in_block_begin < MIN_BLOCK_SIZE ||
+	    in_end - in_next < MIN_BLOCK_SIZE)
+		return false;
+
+	return do_end_block_check(stats, in_next - in_block_begin);
+}
+
+/******************************************************************************/
+
 /*
  * Given the minimum-cost path computed through the item graph for the current
  * block, walk the path and count how many of each symbol in each Huffman-coded
@@ -1803,8 +1934,11 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 	do {
 		/* Starting a new block  */
 		const u8 * const in_block_begin = in_next;
-		const u8 * const in_block_end =
-			in_next + min(LZX_DIV_BLOCK_SIZE, in_end - in_next);
+		const u8 * const in_max_block_end =
+			in_next + min(SOFT_MAX_BLOCK_SIZE, in_end - in_next);
+		const u8 *next_observation = in_next;
+
+		init_block_split_stats(&c->split_stats);
 
 		/* Run the block through the matchfinder and cache the matches. */
 		struct lz_match *cache_ptr = c->match_cache;
@@ -1838,9 +1972,22 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 						 next_hashes,
 						 &best_len,
 						 cache_ptr + 1);
-			in_next++;
+
 			cache_ptr->length = lz_matchptr - (cache_ptr + 1);
 			cache_ptr = lz_matchptr;
+
+			if (in_next >= next_observation) {
+				best_len = cache_ptr[-1].length;
+				if (best_len) {
+					observe_match(&c->split_stats, best_len);
+					next_observation = in_next + best_len;
+				} else {
+					observe_literal(&c->split_stats, *in_next);
+					next_observation = in_next + 1;
+				}
+			}
+
+			in_next++;
 
 			/*
 			 * If there was a very long match found, then don't
@@ -1881,8 +2028,9 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 					cache_ptr++;
 				} while (--best_len);
 			}
-		} while (in_next < in_block_end &&
-			 likely(cache_ptr < &c->match_cache[LZX_CACHE_LENGTH]));
+		} while (in_next < in_max_block_end &&
+			 likely(cache_ptr < &c->match_cache[LZX_CACHE_LENGTH]) &&
+			 !should_end_block(&c->split_stats, in_block_begin, in_next, in_end));
 
 		/* We've finished running the block through the matchfinder.
 		 * Now choose a match/literal sequence and write the block.  */
@@ -2001,8 +2149,8 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 		/* Starting a new block  */
 
 		const u8 * const in_block_begin = in_next;
-		const u8 * const in_block_end =
-			in_next + min(LZX_DIV_BLOCK_SIZE, in_end - in_next);
+		const u8 * const in_max_block_end =
+			in_next + min(SOFT_MAX_BLOCK_SIZE, in_end - in_next);
 		struct lzx_sequence *next_seq = c->chosen_sequences;
 		unsigned cur_len;
 		u32 cur_offset;
@@ -2019,6 +2167,7 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 		u32 litrunlen = 0;
 
 		lzx_reset_symbol_frequencies(c);
+		init_block_split_stats(&c->split_stats);
 
 		do {
 			if (unlikely(max_len > in_end - in_next)) {
@@ -2047,9 +2196,13 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 			{
 				/* There was no match found, or the only match found
 				 * was a distant length 3 match.  Output a literal.  */
-				lzx_record_literal(c, *in_next++, &litrunlen);
+				lzx_record_literal(c, *in_next, &litrunlen);
+				observe_literal(&c->split_stats, *in_next);
+				in_next++;
 				continue;
 			}
+
+			observe_match(&c->split_stats, cur_len);
 
 			if (cur_offset == recent_offsets[0]) {
 				in_next++;
@@ -2163,7 +2316,8 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 					     in_end - in_begin,
 					     skip_len,
 					     next_hashes);
-		} while (in_next < in_block_end);
+		} while (in_next < in_max_block_end &&
+			 !should_end_block(&c->split_stats, in_block_begin, in_next, in_end));
 
 		lzx_finish_sequence(next_seq, litrunlen);
 
