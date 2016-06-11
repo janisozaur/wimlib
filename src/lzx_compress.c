@@ -1785,11 +1785,11 @@ lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
  * simpler "greedy" or "lazy" parse while still being relatively fast.
  */
 static inline void
-lzx_compress_near_optimal(struct lzx_compressor *c,
-			  struct lzx_output_bitstream *os,
+lzx_compress_near_optimal(struct lzx_compressor * restrict c,
+			  const u8 * const restrict in_begin,
+			  struct lzx_output_bitstream * restrict os,
 			  bool is_16_bit)
 {
-	const u8 * const in_begin = c->in_buffer;
 	const u8 *	 in_next = in_begin;
 	const u8 * const in_end  = in_begin + c->in_nbytes;
 	u32 max_len = LZX_MAX_MATCH_LEN;
@@ -1897,14 +1897,14 @@ static void
 lzx_compress_near_optimal_16(struct lzx_compressor *c,
 			     struct lzx_output_bitstream *os)
 {
-	lzx_compress_near_optimal(c, os, true);
+	lzx_compress_near_optimal(c, c->in_buffer, os, true);
 }
 
 static void
 lzx_compress_near_optimal_32(struct lzx_compressor *c,
 			     struct lzx_output_bitstream *os)
 {
-	lzx_compress_near_optimal(c, os, false);
+	lzx_compress_near_optimal(c, c->in_buffer, os, false);
 }
 
 /*
