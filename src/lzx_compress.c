@@ -643,10 +643,12 @@ lzx_flush_output(struct lzx_output_bitstream *os)
 	return os->next - os->start;
 }
 
-/* Build the main, length, and aligned offset Huffman codes used in LZX.
+/*
+ * Build the main, length, and aligned offset Huffman codes used in LZX.
  *
  * This takes as input the frequency tables for each code and produces as output
- * a set of tables that map symbols to codewords and codeword lengths.  */
+ * a set of tables that map symbols to codewords and codeword lengths.
+ */
 static void
 lzx_make_huffman_codes(struct lzx_compressor *c)
 {
@@ -1139,16 +1141,16 @@ lzx_comp_get_offset_slot(struct lzx_compressor *c, u32 adjusted_offset,
 }
 
 /*
- * Finish an LZX block:
+ * Flush an LZX block:
  *
- * - build the Huffman codes
- * - decide whether to output the block as VERBATIM or ALIGNED
- * - output the block
- * - swap the indices of the current and previous Huffman codes
+ * 1. Build the Huffman codes.
+ * 2. Decide whether to output the block as VERBATIM or ALIGNED.
+ * 3. Write the block.
+ * 4. Swap the indices of the current and previous Huffman codes.
  */
 static void
-lzx_finish_block(struct lzx_compressor *c, struct lzx_output_bitstream *os,
-		 const u8 *block_begin, u32 block_size, u32 seq_idx)
+lzx_flush_block(struct lzx_compressor *c, struct lzx_output_bitstream *os,
+		const u8 *block_begin, u32 block_size, u32 seq_idx)
 {
 	int block_type;
 
@@ -1554,7 +1556,8 @@ lzx_record_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
  * c->optimum_nodes[0...block_size].  They correspond directly to the bytes in
  * the current block, plus one extra node for end-of-block.  The edges of the
  * graph are matches and literals.  The goal is to find the minimum cost path
- * from 'c->optimum_nodes[0]' to 'c->optimum_nodes[block_size]'.
+ * from 'c->optimum_nodes[0]' to 'c->optimum_nodes[block_size]', given the cost
+ * model 'c->costs'.
  *
  * The algorithm works forwards, starting at 'c->optimum_nodes[0]' and
  * proceeding forwards one node at a time.  At each node, a selection of matches
@@ -1916,7 +1919,7 @@ lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
 
 /* Update the current cost model to reflect the computed Huffman codes.  */
 static void
-lzx_update_costs(struct lzx_compressor *c)
+lzx_set_costs_from_codes(struct lzx_compressor *c)
 {
 	unsigned i;
 	const struct lzx_lens *lens = &c->codes[c->codes_index].lens;
@@ -1941,6 +1944,15 @@ lzx_update_costs(struct lzx_compressor *c)
 	lzx_compute_match_costs(c);
 }
 
+/*
+ * Choose a "near-optimal" literal/match sequence to use for the current block.
+ * Because the cost of each Huffman symbol is unknown until the Huffman codes
+ * have been built and the Huffman codes themselves depend on the symbol
+ * frequencies, this uses an iterative optimization algorithm to approximate an
+ * optimal solution.  The first optimization pass for the block uses default
+ * costs.  Additional passes use costs taken from the Huffman codes computed in
+ * the previous pass.
+ */
 static inline struct lzx_lru_queue
 lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
 			     struct lzx_output_bitstream * const restrict os,
@@ -1953,25 +1965,26 @@ lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
 	struct lzx_lru_queue new_queue;
 	u32 seq_idx;
 
-	/* The first optimization pass uses a default cost model.  Each
-	 * additional optimization pass uses a cost model derived from the
-	 * Huffman code computed in the previous pass.  */
-
 	lzx_set_default_costs(c, block_begin, block_size);
-	lzx_reset_symbol_frequencies(c);
-	do {
+
+	for (;;) {
 		new_queue = lzx_find_min_cost_path(c, block_begin, block_size,
 						   initial_queue, is_16_bit);
-		if (num_passes_remaining > 1) {
-			lzx_tally_item_list(c, block_size, is_16_bit);
-			lzx_make_huffman_codes(c);
-			lzx_update_costs(c);
-			lzx_reset_symbol_frequencies(c);
-		}
-	} while (--num_passes_remaining);
 
+		if (--num_passes_remaining == 0)
+			break;
+
+		/* At least one optimization pass remains; update the costs. */
+		lzx_reset_symbol_frequencies(c);
+		lzx_tally_item_list(c, block_size, is_16_bit);
+		lzx_make_huffman_codes(c);
+		lzx_set_costs_from_codes(c);
+	}
+
+	/* Done optimizing.  Generate the sequence list and flush the block. */
+	lzx_reset_symbol_frequencies(c);
 	seq_idx = lzx_record_item_list(c, block_size, is_16_bit);
-	lzx_finish_block(c, os, block_begin, block_size, seq_idx);
+	lzx_flush_block(c, os, block_begin, block_size, seq_idx);
 	return new_queue;
 }
 
@@ -2398,7 +2411,7 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 
 		lzx_finish_sequence(next_seq, litrunlen);
 
-		lzx_finish_block(c, os, in_block_begin, in_next - in_block_begin, 0);
+		lzx_flush_block(c, os, in_block_begin, in_next - in_block_begin, 0);
 
 	} while (in_next != in_end);
 }
