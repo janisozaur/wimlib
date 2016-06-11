@@ -111,7 +111,7 @@
  * unknown.  In reality, each token in LZX requires a whole number of bits to
  * output.
  */
-#define LZX_BIT_COST		16
+#define LZX_BIT_COST		64
 
 /*
  * Should the compressor take into account the costs of aligned offset symbols?
@@ -1668,8 +1668,8 @@ lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
 	bool have_byte[256];
 	unsigned num_used_bytes;
 
-	/* The costs below are hard coded to use a scaling factor of 16.  */
-	STATIC_ASSERT(LZX_BIT_COST == 16);
+	/* The costs below are hard coded to use a scaling factor of 64.  */
+	STATIC_ASSERT(LZX_BIT_COST == 64);
 
 	/*
 	 * Heuristics:
@@ -1694,13 +1694,13 @@ lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
 		num_used_bytes += have_byte[i];
 
 	for (i = 0; i < 256; i++)
-		c->costs.main[i] = 140 - (256 - num_used_bytes) / 4;
+		c->costs.main[i] = 560 - (256 - num_used_bytes);
 
 	for (; i < c->num_main_syms; i++)
-		c->costs.main[i] = 170;
+		c->costs.main[i] = 680;
 
 	for (i = 0; i < LZX_LENCODE_NUM_SYMBOLS; i++)
-		c->costs.len[i] = 103 + (i / 4);
+		c->costs.len[i] = 412 + i;
 
 #if LZX_CONSIDER_ALIGNED_COSTS
 	for (i = 0; i < LZX_ALIGNEDCODE_NUM_SYMBOLS; i++)
