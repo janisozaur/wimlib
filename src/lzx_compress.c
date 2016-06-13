@@ -65,26 +65,26 @@
 #endif
 
 /*
- * The compressor always chooses a block of at least MIN_BLOCK_SIZE bytes,
+ * The compressor always chooses a block of at least MIN_BLOCK_LENGTH bytes,
  * except if the last block has to be shorter.
  */
-#define MIN_BLOCK_SIZE		6500
+#define MIN_BLOCK_LENGTH		6500
 
 /*
- * The compressor attempts to end blocks after SOFT_MAX_BLOCK_SIZE bytes, but
+ * The compressor attempts to end blocks after SOFT_MAX_BLOCK_LENGTH bytes, but
  * the final size might be larger due to matches extending beyond the end of the
  * block.  Specifically:
  *
  *  - The greedy parser may choose an arbitrarily long match starting at the
- *    SOFT_MAX_BLOCK_SIZE'th byte.
+ *    SOFT_MAX_BLOCK_LENGTH'th byte.
  *
  *  - The lazy parser may choose a sequence of literals starting at the
- *    SOFT_MAX_BLOCK_SIZE'th byte when it sees a sequence of increasing good
+ *    SOFT_MAX_BLOCK_LENGTH'th byte when it sees a sequence of increasing good
  *    matches.  The final match may be of arbitrary length.  The length of the
  *    literal sequence is approximately limited by the "nice match length"
  *    parameter.
  */
-#define SOFT_MAX_BLOCK_SIZE	100000
+#define SOFT_MAX_BLOCK_LENGTH	100000
 
 /*
  * The number of observed matches or literals that represents sufficient data to
@@ -99,7 +99,7 @@
  * cache.  However, fallback behavior (immediately terminating the block) on
  * cache overflow is still required.
  */
-#define LZX_CACHE_LENGTH	(SOFT_MAX_BLOCK_SIZE * 5)
+#define LZX_CACHE_LENGTH	(SOFT_MAX_BLOCK_LENGTH * 5)
 
 /*
  * LZX_MAX_MATCHES_PER_POS is an upper bound on the number of matches that can
@@ -144,7 +144,7 @@
  * These are the compressor-side limits on the codeword lengths for each Huffman
  * code.  To make outputting bits slightly faster, some of these limits are
  * lower than the limits defined by the LZX format.  This does not significantly
- * affect the compression ratio, at least for the block sizes we use.
+ * affect the compression ratio, at least for the block lengths we use.
  */
 #define MAIN_CODEWORD_LIMIT	16
 #define LENGTH_CODEWORD_LIMIT	12
@@ -162,7 +162,7 @@
 /* Matchfinders with 16-bit positions  */
 #define mf_pos_t	u16
 #define MF_SUFFIX	_16
-#include "wimlib/bt_matchfinder.h"
+#include "wimlib/lcpit_matchfinder.h"
 #include "wimlib/hc_matchfinder.h"
 
 /* Matchfinders with 32-bit positions  */
@@ -170,7 +170,7 @@
 #undef MF_SUFFIX
 #define mf_pos_t	u32
 #define MF_SUFFIX	_32
-#include "wimlib/bt_matchfinder.h"
+#include "wimlib/lcpit_matchfinder.h"
 #include "wimlib/hc_matchfinder.h"
 
 struct lzx_output_bitstream;
@@ -430,7 +430,7 @@ struct lzx_compressor {
 	 * number of matches that can ever be chosen for a single block, plus
 	 * one for the special entry at the end.  */
 	struct lzx_sequence chosen_sequences[
-		       DIV_ROUND_UP(SOFT_MAX_BLOCK_SIZE, LZX_MIN_MATCH_LEN) + 1];
+		       DIV_ROUND_UP(SOFT_MAX_BLOCK_LENGTH, LZX_MIN_MATCH_LEN) + 1];
 
 	/* Tables for mapping adjusted offsets to offset slots  */
 
@@ -459,11 +459,11 @@ struct lzx_compressor {
 			 * This array must be large enough to accommodate the
 			 * worst-case number of nodes, which occurs if we find a
 			 * match of length LZX_MAX_MATCH_LEN at position
-			 * SOFT_MAX_BLOCK_SIZE - 1, producing a block of length
-			 * SOFT_MAX_BLOCK_SIZE - 1 + LZX_MAX_MATCH_LEN.  Add one
+			 * SOFT_MAX_BLOCK_LENGTH - 1, producing a block of length
+			 * SOFT_MAX_BLOCK_LENGTH - 1 + LZX_MAX_MATCH_LEN.  Add one
 			 * for the end-of-block node.
 			 */
-			struct lzx_optimum_node optimum_nodes[SOFT_MAX_BLOCK_SIZE - 1 +
+			struct lzx_optimum_node optimum_nodes[SOFT_MAX_BLOCK_LENGTH - 1 +
 							      LZX_MAX_MATCH_LEN + 1];
 
 			/* The cost model for the current block  */
@@ -496,11 +496,7 @@ struct lzx_compressor {
 						    LZX_MAX_MATCHES_PER_POS +
 						    LZX_MAX_MATCH_LEN - 1];
 
-			/* Binary trees matchfinder (MUST BE LAST!!!)  */
-			union {
-				struct bt_matchfinder_16 bt_mf_16;
-				struct bt_matchfinder_32 bt_mf_32;
-			};
+			struct lcpit_matchfinder lcpit_mf;
 		};
 	};
 };
@@ -528,10 +524,6 @@ lzx_is_16_bit(size_t max_bufsize)
 #define CALL_HC_MF(is_16_bit, c, funcname, ...)				      \
 	((is_16_bit) ? CONCAT(funcname, _16)(&(c)->hc_mf_16, ##__VA_ARGS__) : \
 		       CONCAT(funcname, _32)(&(c)->hc_mf_32, ##__VA_ARGS__));
-
-#define CALL_BT_MF(is_16_bit, c, funcname, ...)				      \
-	((is_16_bit) ? CONCAT(funcname, _16)(&(c)->bt_mf_16, ##__VA_ARGS__) : \
-		       CONCAT(funcname, _32)(&(c)->bt_mf_32, ##__VA_ARGS__));
 
 /*
  * Structure to keep track of the current state of sending bits to the
@@ -1037,7 +1029,7 @@ lzx_write_sequences(struct lzx_output_bitstream *os, int block_type,
 static void
 lzx_write_compressed_block(const u8 *block_begin,
 			   int block_type,
-			   u32 block_size,
+			   u32 block_length,
 			   unsigned window_order,
 			   unsigned num_main_syms,
 			   const struct lzx_sequence sequences[],
@@ -1049,30 +1041,33 @@ lzx_write_compressed_block(const u8 *block_begin,
 	 * LZX_BLOCKTYPE_* constants.  */
 	lzx_write_bits(os, block_type, 3);
 
-	/* Output the block size.
+	/*
+	 * Output the block length.
 	 *
-	 * The original LZX format seemed to always encode the block size in 3
+	 * The original LZX format seemed to always encode the block length in 3
 	 * bytes.  However, the implementation in WIMGAPI, as used in WIM files,
-	 * uses the first bit to indicate whether the block is the default size
-	 * (32768) or a different size given explicitly by the next 16 bits.
+	 * uses the first bit to indicate whether the block is the default
+	 * length (32768) or a different length given explicitly by the next 16
+	 * bits.
 	 *
 	 * By default, this compressor uses a window size of 32768 and therefore
 	 * follows the WIMGAPI behavior.  However, this compressor also supports
 	 * window sizes greater than 32768 bytes, which do not appear to be
 	 * supported by WIMGAPI.  In such cases, we retain the default size bit
-	 * to mean a size of 32768 bytes but output non-default block size in 24
-	 * bits rather than 16.  The compatibility of this behavior is unknown
-	 * because WIMs created with chunk size greater than 32768 can seemingly
-	 * only be opened by wimlib anyway.  */
-	if (block_size == LZX_DEFAULT_BLOCK_SIZE) {
+	 * to mean a size of 32768 bytes but output non-default block length in
+	 * 24 bits rather than 16.  The compatibility of this behavior is
+	 * unknown because WIMs created with chunk size greater than 32768 can
+	 * seemingly only be opened by wimlib anyway.
+	 */
+	if (block_length == LZX_DEFAULT_BLOCK_SIZE) {
 		lzx_write_bits(os, 1, 1);
 	} else {
 		lzx_write_bits(os, 0, 1);
 
 		if (window_order >= 16)
-			lzx_write_bits(os, block_size >> 16, 8);
+			lzx_write_bits(os, block_length >> 16, 8);
 
-		lzx_write_bits(os, block_size & 0xFFFF, 16);
+		lzx_write_bits(os, block_length & 0xFFFF, 16);
 	}
 
 	/* If it's an aligned offset block, output the aligned offset code.  */
@@ -1150,7 +1145,7 @@ lzx_comp_get_offset_slot(struct lzx_compressor *c, u32 adjusted_offset,
  */
 static void
 lzx_flush_block(struct lzx_compressor *c, struct lzx_output_bitstream *os,
-		const u8 *block_begin, u32 block_size, u32 seq_idx)
+		const u8 *block_begin, u32 block_length, u32 seq_idx)
 {
 	int block_type;
 
@@ -1160,7 +1155,7 @@ lzx_flush_block(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 						    &c->codes[c->codes_index]);
 	lzx_write_compressed_block(block_begin,
 				   block_type,
-				   block_size,
+				   block_length,
 				   c->window_order,
 				   c->num_main_syms,
 				   &c->chosen_sequences[seq_idx],
@@ -1274,9 +1269,9 @@ lzx_finish_sequence(struct lzx_sequence *last_seq, u32 litrunlen)
  * For determining whether the frequency distributions are "different enough" to
  * start a new block, the simply heuristic of splitting when the sum of absolute
  * differences exceeds a constant seems to be good enough.  We also add a number
- * proportional to the block size so that the algorithm is more likely to end
- * large blocks than small blocks.  This reflects the general expectation that
- * it will become increasingly beneficial to start a new block as the current
+ * proportional to the block length so that the algorithm is more likely to end
+ * long blocks than short blocks.  This reflects the general expectation that it
+ * will become increasingly beneficial to start a new block as the current
  * blocks grows larger.
  *
  * Finally, for an approximation, it is not strictly necessary that the exact
@@ -1317,7 +1312,7 @@ observe_match(struct block_split_stats *stats, unsigned length)
 }
 
 static bool
-do_end_block_check(struct block_split_stats *stats, u32 block_size)
+do_end_block_check(struct block_split_stats *stats, u32 block_length)
 {
 	if (stats->num_observations > 0) {
 
@@ -1334,7 +1329,7 @@ do_end_block_check(struct block_split_stats *stats, u32 block_size)
 		}
 
 		/* Ready to end the block? */
-		if (total_delta + (block_size / 1024) * stats->num_observations >=
+		if (total_delta + (block_length / 1024) * stats->num_observations >=
 		    stats->num_new_observations * 51 / 64 * stats->num_observations)
 			return true;
 	}
@@ -1354,8 +1349,8 @@ should_end_block(struct block_split_stats *stats,
 {
 	/* Ready to check block split statistics? */
 	if (stats->num_new_observations < NUM_OBSERVATIONS_PER_BLOCK_CHECK ||
-	    in_next - in_block_begin < MIN_BLOCK_SIZE ||
-	    in_end - in_next < MIN_BLOCK_SIZE)
+	    in_next - in_block_begin < MIN_BLOCK_LENGTH ||
+	    in_end - in_next < MIN_BLOCK_LENGTH)
 		return false;
 
 	return do_end_block_check(stats, in_next - in_block_begin);
@@ -1374,9 +1369,9 @@ should_end_block(struct block_split_stats *stats,
  * computes frequencies.
  */
 static inline void
-lzx_tally_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
+lzx_tally_item_list(struct lzx_compressor *c, u32 block_length, bool is_16_bit)
 {
-	u32 node_idx = block_size;
+	u32 node_idx = block_length;
 
 	for (;;) {
 		u32 item;
@@ -1451,9 +1446,9 @@ lzx_tally_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
  * which the lzx_sequences begin.
  */
 static inline u32
-lzx_record_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
+lzx_record_item_list(struct lzx_compressor *c, u32 block_length, bool is_16_bit)
 {
-	u32 node_idx = block_size;
+	u32 node_idx = block_length;
 	u32 seq_idx = ARRAY_LEN(c->chosen_sequences) - 1;
 	u32 lit_start_node;
 
@@ -1553,10 +1548,10 @@ lzx_record_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
 /*
  * Find an inexpensive path through the graph of possible match/literal choices
  * for the current block.  The nodes of the graph are
- * c->optimum_nodes[0...block_size].  They correspond directly to the bytes in
+ * c->optimum_nodes[0...block_length].  They correspond directly to the bytes in
  * the current block, plus one extra node for end-of-block.  The edges of the
  * graph are matches and literals.  The goal is to find the minimum cost path
- * from 'c->optimum_nodes[0]' to 'c->optimum_nodes[block_size]', given the cost
+ * from 'c->optimum_nodes[0]' to 'c->optimum_nodes[block_length]', given the cost
  * model 'c->costs'.
  *
  * The algorithm works forwards, starting at 'c->optimum_nodes[0]' and
@@ -1585,14 +1580,14 @@ lzx_record_item_list(struct lzx_compressor *c, u32 block_size, bool is_16_bit)
 static inline struct lzx_lru_queue
 lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 		       const u8 * const restrict block_begin,
-		       const u32 block_size,
+		       const u32 block_length,
 		       const struct lzx_lru_queue initial_queue,
 		       bool is_16_bit)
 {
 	struct lzx_optimum_node *cur_node = c->optimum_nodes;
 	struct lz_match *cache_ptr = c->match_cache;
 	const u8 *in_next = block_begin;
-	const u8 * const block_end = block_begin + block_size;
+	const u8 * const block_end = block_begin + block_length;
 
 	/* Instead of storing the match offset LRU queues in the
 	 * 'lzx_optimum_node' structures, we save memory (and cache lines) by
@@ -1607,15 +1602,16 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 
 	/* Initially, the cost to reach each node is "infinity".  */
 	memset(c->optimum_nodes, 0xFF,
-	       (block_size + 1) * sizeof(c->optimum_nodes[0]));
+	       (block_length + 1) * sizeof(c->optimum_nodes[0]));
 
 	QUEUE(block_begin) = initial_queue;
 
-	/* The following loop runs 'block_size' iterations, one per node.  */
+	/* The following loop runs 'block_length' iterations, one per node.  */
 	do {
 		unsigned num_matches;
 		unsigned literal;
 		u32 cost;
+		struct lz_match *matches;
 
 		/*
 		 * A selection of matches for the block was already saved in
@@ -1643,9 +1639,9 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 
 		num_matches = cache_ptr->length;
 		cache_ptr++;
+		matches = cache_ptr;
 
 		if (num_matches) {
-			struct lz_match *end_matches = cache_ptr + num_matches;
 			unsigned next_len = LZX_MIN_MATCH_LEN;
 			unsigned max_len = min(block_end - in_next, LZX_MAX_MATCH_LEN);
 			const u8 *matchptr;
@@ -1664,10 +1660,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(0 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R0_done:
@@ -1690,10 +1684,8 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(1 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R1_done:
@@ -1716,17 +1708,18 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					(cur_node + next_len)->item =
 						(2 << OPTIMUM_OFFSET_SHIFT) | next_len;
 				}
-				if (unlikely(++next_len > max_len)) {
-					cache_ptr = end_matches;
+				if (unlikely(++next_len > max_len))
 					goto done_matches;
-				}
 			} while (in_next[next_len - 1] == matchptr[next_len - 1]);
 
 		R2_done:
-
-			while (next_len > cache_ptr->length)
-				if (++cache_ptr == end_matches)
+			matches = cache_ptr;
+			cache_ptr += num_matches - 1;
+			while (next_len > cache_ptr->length) {
+				if (cache_ptr == matches)
 					goto done_matches;
+				cache_ptr--;
+			}
 
 			/* Consider explicit offset matches  */
 			for (;;) {
@@ -1753,7 +1746,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					}
 				} while (++next_len <= cache_ptr->length);
 
-				if (++cache_ptr == end_matches) {
+				if (cache_ptr == matches) {
 					/* Consider match + lit + rep0 */
 					u32 remaining = block_end - (in_next + next_len);
 					if (likely(remaining >= 2)) {
@@ -1778,10 +1771,12 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 					}
 					break;
 				}
+				cache_ptr--;
 			}
 		}
 
 	done_matches:
+		cache_ptr = matches + num_matches;
 
 		/* Consider coding a literal.
 
@@ -1869,7 +1864,7 @@ lzx_compute_match_costs(struct lzx_compressor *c)
 /* Set default LZX Huffman symbol costs to bootstrap the iterative optimization
  * algorithm.  */
 static void
-lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
+lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_length)
 {
 	u32 i;
 	bool have_byte[256];
@@ -1893,7 +1888,7 @@ lzx_set_default_costs(struct lzx_compressor *c, const u8 *block, u32 block_size)
 	for (i = 0; i < 256; i++)
 		have_byte[i] = false;
 
-	for (i = 0; i < block_size; i++)
+	for (i = 0; i < block_length; i++)
 		have_byte[block[i]] = true;
 
 	num_used_bytes = 0;
@@ -1957,7 +1952,7 @@ static inline struct lzx_lru_queue
 lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
 			     struct lzx_output_bitstream * const restrict os,
 			     const u8 * const restrict block_begin,
-			     const u32 block_size,
+			     const u32 block_length,
 			     const struct lzx_lru_queue initial_queue,
 			     bool is_16_bit)
 {
@@ -1965,26 +1960,26 @@ lzx_optimize_and_write_block(struct lzx_compressor * const restrict c,
 	struct lzx_lru_queue new_queue;
 	u32 seq_idx;
 
-	lzx_set_default_costs(c, block_begin, block_size);
+	lzx_set_default_costs(c, block_begin, block_length);
 
 	for (;;) {
-		new_queue = lzx_find_min_cost_path(c, block_begin, block_size,
+		new_queue = lzx_find_min_cost_path(c, block_begin, block_length,
 						   initial_queue, is_16_bit);
 
 		if (--num_passes_remaining == 0)
 			break;
 
-		/* At least one optimization pass remains; update the costs. */
+		/* At least one iteration remains; update the costs. */
 		lzx_reset_symbol_frequencies(c);
-		lzx_tally_item_list(c, block_size, is_16_bit);
+		lzx_tally_item_list(c, block_length, is_16_bit);
 		lzx_make_huffman_codes(c);
 		lzx_set_costs_from_codes(c);
 	}
 
 	/* Done optimizing.  Generate the sequence list and flush the block. */
 	lzx_reset_symbol_frequencies(c);
-	seq_idx = lzx_record_item_list(c, block_size, is_16_bit);
-	lzx_flush_block(c, os, block_begin, block_size, seq_idx);
+	seq_idx = lzx_record_item_list(c, block_length, is_16_bit);
+	lzx_flush_block(c, os, block_begin, block_length, seq_idx);
 	return new_queue;
 }
 
@@ -2009,23 +2004,19 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 {
 	const u8 *	 in_next = in_begin;
 	const u8 * const in_end  = in_begin + c->in_nbytes;
-	u32 max_len = LZX_MAX_MATCH_LEN;
-	u32 nice_len = min(c->nice_match_length, max_len);
-	u32 next_hashes[2] = {};
 	struct lzx_lru_queue queue;
 
-	CALL_BT_MF(is_16_bit, c, bt_matchfinder_init);
+	lcpit_matchfinder_load_buffer(&c->lcpit_mf, in_begin, c->in_nbytes);
 	lzx_lru_queue_init(&queue);
 
 	do {
 		/* Starting a new block  */
 		const u8 * const in_block_begin = in_next;
 		const u8 * const in_max_block_end =
-			in_next + min(SOFT_MAX_BLOCK_SIZE, in_end - in_next);
+			in_next + min(SOFT_MAX_BLOCK_LENGTH, in_end - in_next);
 		struct lz_match *cache_ptr = c->match_cache;
-		const u8 *next_search_pos = in_next;
 		const u8 *next_observation = in_next;
-		const u8 *next_pause_point = min(in_next + MIN_BLOCK_SIZE,
+		const u8 *next_pause_point = min(in_next + MIN_BLOCK_LENGTH,
 						 in_max_block_end - LZX_MAX_MATCH_LEN - 1);
 
 		init_block_split_stats(&c->split_stats);
@@ -2033,77 +2024,59 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 		/* Run the block through the matchfinder and cache the matches. */
 	enter_mf_loop:
 		do {
-			if (in_next >= next_search_pos) {
-				struct lz_match *lz_matchptr;
-				u32 best_len;
+			u32 num_matches;
+			u32 best_len = 0;
 
-				lz_matchptr = CALL_BT_MF(is_16_bit, c,
-							 bt_matchfinder_get_matches,
-							 in_begin,
-							 in_next - in_begin,
-							 max_len,
-							 nice_len,
-							 c->max_search_depth,
-							 next_hashes,
-							 &best_len,
-							 cache_ptr + 1);
-				cache_ptr->length = lz_matchptr - (cache_ptr + 1);
-				cache_ptr = lz_matchptr;
+			num_matches = lcpit_matchfinder_get_matches(&c->lcpit_mf, cache_ptr + 1);
+			cache_ptr->length = num_matches;
+			if (num_matches)
+				best_len = cache_ptr[1].length;
 
-				if (in_next >= next_observation) {
-					best_len = cache_ptr[-1].length;
-					if (best_len) {
-						observe_match(&c->split_stats, best_len);
-						next_observation = in_next + best_len;
-					} else {
-						observe_literal(&c->split_stats, *in_next);
-						next_observation = in_next + 1;
-					}
+			if (in_next >= next_observation) {
+				if (best_len) {
+					observe_match(&c->split_stats, best_len);
+					next_observation = in_next + best_len;
+				} else {
+					observe_literal(&c->split_stats, *in_next);
+					next_observation = in_next + 1;
 				}
-				/*
-				 * If there was a very long match found, then don't
-				 * cache any matches for the bytes covered by that
-				 * match.  This avoids degenerate behavior when
-				 * compressing highly redundant data, where the number
-				 * of matches can be very large.
-				 *
-				 * This heuristic doesn't actually hurt the compression
-				 * ratio very much.  If there's a long match, then the
-				 * data must be highly compressible, so it doesn't
-				 * matter as much what we do.
-				 */
-				if (best_len >= nice_len) {
-					next_search_pos = in_next + best_len;
-					next_observation = next_search_pos;
-				}
-			} else {
-				CALL_BT_MF(is_16_bit, c,
-					   bt_matchfinder_skip_position,
-					   in_begin,
-					   in_next - in_begin,
-					   nice_len,
-					   c->max_search_depth,
-					   next_hashes);
-				cache_ptr->length = 0;
-				cache_ptr++;
 			}
-		} while (++in_next < next_pause_point &&
+
+			/*
+			 * If there was a very long match found, then don't
+			 * cache any matches for the bytes covered by that
+			 * match.  This avoids degenerate behavior when
+			 * compressing highly redundant data, where the number
+			 * of matches can be very large.
+			 *
+			 * This heuristic doesn't actually hurt the compression
+			 * ratio very much.  If there's a long match, then the
+			 * data must be highly compressible, so it doesn't
+			 * matter as much what we do.
+			 */
+			if (best_len >= c->nice_match_length) {
+				best_len = lz_extend(in_next, in_next - cache_ptr[1].offset,
+						     best_len,
+						     min(LZX_MAX_MATCH_LEN,
+							 in_end - in_next));
+				cache_ptr[1].length = best_len;
+				lcpit_matchfinder_skip_bytes(&c->lcpit_mf, best_len - 1);
+				cache_ptr += 1 + num_matches;
+				for (u32 i = 0; i < best_len - 1; i++) {
+					cache_ptr->length = 0;
+					cache_ptr++;
+				}
+				in_next += best_len;
+				next_observation = in_next;
+			} else {
+				cache_ptr += 1 + num_matches;
+				in_next++;
+			}
+		} while (in_next < next_pause_point &&
 			 likely(cache_ptr < &c->match_cache[LZX_CACHE_LENGTH]));
 
 		if (unlikely(cache_ptr >= &c->match_cache[LZX_CACHE_LENGTH]))
 			goto flush_block;
-
-		if (max_len > in_end - in_next) {
-			max_len = in_end - in_next;
-			nice_len = min(max_len, nice_len);
-			if (unlikely(max_len < BT_MATCHFINDER_REQUIRED_NBYTES)) {
-				while (in_next != in_end) {
-					in_next++;
-					cache_ptr->length = 0;
-					cache_ptr++;
-				}
-			}
-		}
 
 		if (in_next >= in_max_block_end)
 			goto flush_block;
@@ -2111,7 +2084,7 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 		if (c->split_stats.num_new_observations >= NUM_OBSERVATIONS_PER_BLOCK_CHECK) {
 			if (do_end_block_check(&c->split_stats, in_next - in_block_begin))
 				goto flush_block;
-			if (in_max_block_end - in_next <= MIN_BLOCK_SIZE)
+			if (in_max_block_end - in_next <= MIN_BLOCK_LENGTH)
 				next_observation = in_max_block_end;
 		}
 
@@ -2240,7 +2213,7 @@ lzx_compress_lazy(struct lzx_compressor *c, struct lzx_output_bitstream *os,
 
 		const u8 * const in_block_begin = in_next;
 		const u8 * const in_max_block_end =
-			in_next + min(SOFT_MAX_BLOCK_SIZE, in_end - in_next);
+			in_next + min(SOFT_MAX_BLOCK_LENGTH, in_end - in_next);
 		struct lzx_sequence *next_seq = c->chosen_sequences;
 		unsigned cur_len;
 		u32 cur_offset;
@@ -2466,11 +2439,11 @@ lzx_get_compressor_size(size_t max_bufsize, unsigned compression_level)
 			       hc_matchfinder_size_32(max_bufsize);
 	} else {
 		if (lzx_is_16_bit(max_bufsize))
-			return offsetof(struct lzx_compressor, bt_mf_16) +
-			       bt_matchfinder_size_16(max_bufsize);
+			return offsetof(struct lzx_compressor, lcpit_mf) +
+			       sizeof(struct lcpit_matchfinder);
 		else
-			return offsetof(struct lzx_compressor, bt_mf_32) +
-			       bt_matchfinder_size_32(max_bufsize);
+			return offsetof(struct lzx_compressor, lcpit_mf) +
+			       sizeof(struct lcpit_matchfinder);
 	}
 }
 
@@ -2486,6 +2459,8 @@ lzx_get_needed_memory(size_t max_bufsize, unsigned compression_level,
 	size += lzx_get_compressor_size(max_bufsize, compression_level);
 	if (!destructive)
 		size += max_bufsize; /* in_buffer */
+	if (compression_level > LZX_MAX_FAST_LEVEL)
+		size += lcpit_matchfinder_get_needed_memory(max_bufsize);
 	return size;
 }
 
@@ -2576,10 +2551,17 @@ lzx_create_compressor(size_t max_bufsize, unsigned compression_level,
 	if (c->nice_match_length > LZX_MAX_MATCH_LEN)
 		c->nice_match_length = LZX_MAX_MATCH_LEN;
 
+	if (!lcpit_matchfinder_init(&c->lcpit_mf, max_bufsize,
+				    LZX_MIN_MATCH_LEN, c->nice_match_length))
+		goto oom2;
+
 	lzx_init_offset_slot_tabs(c);
 	*c_ret = c;
 	return 0;
 
+oom2:
+	if (!c->destructive)
+		FREE(c->in_buffer);
 oom1:
 	FREE(c);
 oom0:
@@ -2628,6 +2610,7 @@ lzx_free_compressor(void *_c)
 {
 	struct lzx_compressor *c = _c;
 
+	lcpit_matchfinder_destroy(&c->lcpit_mf);
 	if (!c->destructive)
 		FREE(c->in_buffer);
 	FREE(c);

@@ -78,7 +78,7 @@
  * different as well.  */
 #define LZX_WIM_MAGIC_FILESIZE	12000000
 
-/* Assumed LZX block size when the encoded block size begins with a 0 bit.
+/* Assumed LZX block length when the encoded block size begins with a 0 bit.
  * This is probably WIM-specific.  */
 #define LZX_DEFAULT_BLOCK_SIZE	32768
 
