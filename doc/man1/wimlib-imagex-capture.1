@@ -57,7 +57,7 @@ following types of information:
 .IP \[bu] 4
 Directories and regular files, and the contents of regular files
 .IP \[bu]
-Hard links
+Hard links, except for symbolic link files
 .IP \[bu]
 Symbolic links (translated losslessly to Windows reparse points)
 .IP \[bu]
@@ -69,12 +69,23 @@ With \fB--unix-data\fR: UNIX owners, groups, and modes
 With \fB--unix-data\fR: device nodes, FIFOs, and UNIX domain sockets
 .PP
 There is no support for storing extended attributes (e.g. SELinux security
-labels and POSIX ACLs).  Also note that last status change times (ctime) are not
-stored.
+labels and POSIX ACLs), last status change times (ctimes), or hard link
+information for symbolic link files (each symbolic link will be stored as an
+independent file).
 .PP
-Pedantic note: A limitation of the WIM format prevents the unusual case where a
-single symbolic link file itself has multiple names (hard links); in this
-unlikely case, each symbolic link is stored as an independent file.
+Names, such as file names and symbolic link targets, are interpreted as UTF-8
+strings.  Other 8-bit encodings are not currently supported.  Note that if you
+have a filesystem containing filenames in another multibyte encoding, such as
+ISO-8859-1, and you wish to archive it with wimlib, you may be able to mount it
+with an option which causes its filenames to be presented as UTF-8.
+.PP
+However, to ensure that backup and restore of all possible names on UNIX-style
+filesystems is always possible, names that are not valid UTF-8 are still
+permitted.  Such names are transcoded to a nonstandard extension of UTF-16LE
+which encodes the invalid bytes as surrogate escape codes.  Do note that while
+this allows such names to be losslessly preserved when backed up and restored on
+UNIX, you cannot expect to get meaningful results if you were to extract such
+names to a Windows-style filesystem (though it would still be lossless).
 .SH NTFS VOLUME CAPTURE (UNIX)
 This section documents how \fBwimlib-imagex\fR captures files directly from
 an NTFS volume image on UNIX-like systems.
