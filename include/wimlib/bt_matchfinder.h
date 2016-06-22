@@ -81,7 +81,9 @@ struct lz_match {
 	u32 length;
 
 	/* The offset back from the current position that was matched.  */
-	u32 offset;
+	u16 offset;
+
+	u16 offset_slot;
 };
 
 #endif /* _WIMLIB_BT_MATCHFINDER_H */

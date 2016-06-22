@@ -1702,7 +1702,7 @@ lzx_find_min_cost_path(struct lzx_compressor * const restrict c,
 			for (;;) {
 				u32 offset = cache_ptr->offset;
 				u32 offset_data = offset + LZX_OFFSET_ADJUSTMENT;
-				unsigned offset_slot = lzx_get_offset_slot(c, offset_data, is_16_bit);
+				unsigned offset_slot = cache_ptr->offset_slot;
 				u32 base_cost = cur_node->cost;
 				u32 cost;
 
@@ -1943,6 +1943,76 @@ lzx_set_costs_from_codes(struct lzx_compressor *c)
 	lzx_compute_match_costs(c);
 }
 
+static noinline void
+lzx_adjust_matches(struct lzx_compressor *c, u32 block_size, struct lz_match *end_cache_ptr)
+{
+	unsigned cur_offset_slot;
+	struct lz_match *cache_ptr = c->match_cache;
+	struct lz_match *run_begin;
+	u32 match_count;
+	unsigned offset_slot;
+	u32 count = 0;
+
+	end_cache_ptr->offset = 0;
+	run_begin = cache_ptr++;
+	match_count = 0;
+	cur_offset_slot = -1;
+	for (;;) {
+		if (cache_ptr->offset == 0) {
+			count++;
+			run_begin->length = match_count;
+			run_begin->offset = 0;
+			run_begin += 1 + match_count;
+			match_count = 0;
+			cur_offset_slot = -1;
+			if (cache_ptr++ == end_cache_ptr)
+				break;
+			continue;
+		}
+
+		offset_slot = lzx_get_offset_slot(c, cache_ptr->offset + LZX_OFFSET_ADJUSTMENT, true);
+		cache_ptr->offset_slot = offset_slot;
+		if (offset_slot != cur_offset_slot)
+			match_count++;
+		cur_offset_slot = offset_slot;
+		run_begin[match_count] = *cache_ptr++;
+	}
+	run_begin->offset = 0;
+
+#if 0
+	struct lz_match *p = c->match_cache;
+	for (u32 i = 0; i < block_size; i++) {
+		/*printf("CHECK %u; num_matches=%u\n", i, p->length);*/
+		assert(p->offset == 0);
+		u32 num_matches = p->length;
+		p++;
+		if (num_matches) {
+			for (u32 j = 0; j < num_matches; j++) {
+				struct lz_match *match = &p[j];
+				assert(match->length>=2 && match->length <= 257);
+				assert(match->offset >= 1 && match->offset <= i);
+				/*assert(match->offset_slot == lzx_comp_get_offset_slot(c, match->offset+2, true));*/
+			}
+			for (u32 j = 1; j < num_matches; j++) {
+				struct lz_match match1 = p[j - 1];
+				struct lz_match match2 = p[j];
+				assert(match1.length < match2.length);
+				assert(match1.offset <= match2.offset);
+				/*assert(match1.offset_slot < match2.offset_slot);*/
+			}
+		}
+		p += num_matches;
+	}
+	assert(p->offset == 0);
+#elif 0
+	struct lz_match *p = c->match_cache;
+	while (p != end_cache_ptr) {
+		printf("Length=%u Offset=%u Slot=%u\n", p->length, p->offset, p->offset_slot);
+		p++;
+	}
+#endif
+}
+
 /*
  * Choose a "near-optimal" literal/match sequence to use for the current block,
  * then flush the block.  Because the cost of each Huffman symbol is unknown
@@ -2061,6 +2131,7 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 							 &best_len,
 							 cache_ptr + 1);
 				cache_ptr->length = lz_matchptr - (cache_ptr + 1);
+				cache_ptr->offset = 0;
 				cache_ptr = lz_matchptr;
 
 				/* Accumulate block split statistics. */
@@ -2102,6 +2173,7 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 					   c->max_search_depth,
 					   next_hashes);
 				cache_ptr->length = 0;
+				cache_ptr->offset = 0;
 				cache_ptr++;
 			}
 		} while (++in_next < next_pause_point &&
@@ -2118,6 +2190,7 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 			if (max_len < BT_MATCHFINDER_REQUIRED_NBYTES) {
 				while (in_next != in_end) {
 					cache_ptr->length = 0;
+					cache_ptr->offset = 0;
 					cache_ptr++;
 					in_next++;
 				}
@@ -2154,6 +2227,8 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 		goto resume_matchfinding;
 
 	end_block:
+		lzx_adjust_matches(c, in_next - in_block_begin, cache_ptr);
+
 		/* We've decided on a block boundary and cached matches.  Now
 		 * choose a match/literal sequence and flush the block. */
 		queue = lzx_optimize_and_flush_block(c, os, in_block_begin,
