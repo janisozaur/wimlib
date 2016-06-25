@@ -59,6 +59,7 @@
 #define ALLOW_INVALID_UNICODE	1
 
 #define INVALID_CODEPOINT	0xFFFFFFFF
+#define ESCAPE_BASE		0x80000000 /* arbitrary; not persisted */
 #define VALIDATE(expr)		if (unlikely(!(expr))) goto invalid
 #define IS_SURROGATE(c)		((c) >= 0xD800 && (c) < 0xE000)
 #define IS_HIGH_SURROGATE(c)	((c) >= 0xD800 && (c) < 0xDC00)
@@ -127,7 +128,7 @@ utf8_decode_codepoint(const u8 *in, size_t remaining, u32 *c_ret)
 invalid:
 #if ALLOW_INVALID_UNICODE
 	/* Decode an invalid byte as a surrogate escape code. */
-	*c_ret = 0xDC00 + in[0];
+	*c_ret = ESCAPE_BASE + in[0];
 #else
 	*c_ret = INVALID_CODEPOINT;
 #endif
@@ -149,19 +150,19 @@ utf8_encode_codepoint(u32 c, u8 *out)
 	}
 
 	if (c < 0x10000) {
-	#if ALLOW_INVALID_UNICODE
-		if (IS_SURROGATE_ESCAPE(c)) {
-			/* Encode a surrogate escape code as an invalid byte
-			 * 0x80...0xFF. */
-			out[0] = c - 0xDC00;
-			return 1;
-		}
-	#endif
 		out[0] = 0xE0 | (c >> 12);
 		out[1] = 0x80 | ((c >> 6) & 0x3F);
 		out[2] = 0x80 | (c & 0x3F);
 		return 3;
 	}
+
+#if ALLOW_INVALID_UNICODE
+	if (c >= ESCAPE_BASE) {
+		/* Escaped byte */
+		out[0] = c - ESCAPE_BASE;
+		return 1;
+	}
+#endif
 
 	out[0] = 0xF0 | (c >> 18);
 	out[1] = 0x80 | ((c >> 12) & 0x3F);
