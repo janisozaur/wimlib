@@ -2890,6 +2890,8 @@ lzx_create_compressor(size_t max_bufsize, unsigned compression_level,
 	/* Prepare the offset => offset slot mapping. */
 	lzx_init_offset_slot_tabs(c);
 
+	crc_init();
+
 	*c_ret = c;
 	return 0;
 

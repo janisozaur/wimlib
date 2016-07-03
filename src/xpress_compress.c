@@ -1133,6 +1133,8 @@ xpress_create_compressor(size_t max_bufsize, unsigned compression_level,
 	if (c->max_search_depth < 1)
 		c->max_search_depth = 1;
 
+	crc_init();
+
 	*c_ret = c;
 	return 0;
 

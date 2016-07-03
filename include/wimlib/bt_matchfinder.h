@@ -84,6 +84,21 @@ struct lz_match {
 	u32 offset;
 };
 
+static u32 crc[256];
+
+#define kCrcPoly 0xEDB88320
+
+static void crc_init(void)
+{
+	for (u32 i = 0; i < 256; i++) {
+		u32 r = i;
+		unsigned j;
+		for (j = 0; j < 8; j++)
+			r = (r >> 1) ^ (kCrcPoly & ~((r & 1) - 1));
+		crc[i] = r;
+	}
+}
+
 #endif /* _WIMLIB_BT_MATCHFINDER_H */
 
 struct TEMPLATED(bt_matchfinder) {
@@ -181,11 +196,13 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	seq2 = loaded_u32_to_u16(seq4);
 #endif
 
-	hash4 = lz_hash(seq4, BT_MATCHFINDER_HASH4_ORDER);
-	hash3 = lz_hash(seq3, BT_MATCHFINDER_HASH3_ORDER);
+	u32 temp = crc[in_next[0]] ^ in_next[1];
 #ifdef BT_MATCHFINDER_HASH2_ORDER
-	hash2 = lz_hash(seq2, BT_MATCHFINDER_HASH2_ORDER);
+	hash2 = temp & ((1 << BT_MATCHFINDER_HASH2_ORDER) - 1);
 #endif
+	temp ^= ((u32)in_next[2] << 8);
+	hash3 = temp & ((1 << BT_MATCHFINDER_HASH3_ORDER) - 1);
+	hash4 = (temp ^ (crc[in_next[3]] << 5)) & ((1 << BT_MATCHFINDER_HASH4_ORDER) - 1);
 
 #ifdef BT_MATCHFINDER_HASH2_ORDER
 	cur_node = mf->hash2_tab[hash2];
