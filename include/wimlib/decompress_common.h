@@ -198,68 +198,165 @@ bitstream_align(struct input_bitstream *is)
  * about dealing with the unaligned case.  */
 #define DECODE_TABLE_ALIGNMENT 16
 
-/* Maximum supported symbol count for make_huffman_decode_table().
- *
- * Reason: In direct mapping entries, we store the symbol in 11 bits.  */
-#define DECODE_TABLE_MAX_SYMBOLS 2048
+#define DECODE_TABLE_SYMBOL_SHIFT 4
+#define DECODE_TABLE_LENGTH_MASK DECODE_TABLE_MAX_LENGTH
 
-/* Maximum supported table bits for make_huffman_decode_table().
- *
- * Reason: In internal binary tree nodes, offsets are encoded in 14 bits.
- * But the real limit is 13, because we allocate entries past the end of
- * the direct lookup part of the table for binary tree nodes.  (Note: if
- * needed this limit could be removed by encoding the offsets relative to
- * &decode_table[1 << table_bits].)  */
-#define DECODE_TABLE_MAX_TABLE_BITS 13
+#define DECODE_TABLE_MAX_NUM_SYMS ((1 << (16 - DECODE_TABLE_SYMBOL_SHIFT)) - 1)
+#define DECODE_TABLE_MAX_LENGTH ((1 << DECODE_TABLE_SYMBOL_SHIFT) - 1)
 
-/* Maximum supported codeword length for make_huffman_decode_table().
+/*
+ * Reads and returns the next Huffman-encoded symbol from a bitstream.
  *
- * Reason: In direct mapping entries, we encode the codeword length in 5
- * bits, and the top 2 bits can't both be set because that has special
- * meaning.  */
-#define DECODE_TABLE_MAX_CODEWORD_LEN 23
-
-/* Reads and returns the next Huffman-encoded symbol from a bitstream.  If the
- * input data is exhausted, the Huffman symbol is decoded as if the missing bits
- * are all zeroes.
+ * If the input data is exhausted, the Huffman symbol is decoded as if the
+ * missing bits are all zeroes.
  *
  * XXX: This is mostly duplicated in lzms_decode_huffman_symbol() in
- * lzms_decompress.c.  */
+ * lzms_decompress.c.
+ */
 static inline unsigned
-read_huffsym(struct input_bitstream *istream, const u16 decode_table[],
+read_huffsym(struct input_bitstream *is, const u16 decode_table[],
 	     unsigned table_bits, unsigned max_codeword_len)
 {
 	unsigned entry;
-	unsigned key_bits;
+	unsigned sym;
+	unsigned len;
 
-	bitstream_ensure_bits(istream, max_codeword_len);
+	/* If the bitbuffer contains fewer bits than might be required by a
+	 * single codeword, then refill it. */
+	bitstream_ensure_bits(is, max_codeword_len);
 
-	/* Index the decode table by the next table_bits bits of the input.  */
-	key_bits = bitstream_peek_bits(istream, table_bits);
-	entry = decode_table[key_bits];
-	if (likely(entry < 0xC000)) {
-		/* Fast case: The decode table directly provided the
-		 * symbol and codeword length.  The low 11 bits are the
-		 * symbol, and the high 5 bits are the codeword length.  */
-		bitstream_remove_bits(istream, entry >> 11);
-		return entry & 0x7FF;
-	} else {
-		/* Slow case: The codeword for the symbol is longer than
-		 * table_bits, so the symbol does not have an entry
-		 * directly in the first (1 << table_bits) entries of the
-		 * decode table.  Traverse the appropriate binary tree
-		 * bit-by-bit to decode the symbol.  */
-		bitstream_remove_bits(istream, table_bits);
-		do {
-			key_bits = (entry & 0x3FFF) + bitstream_pop_bits(istream, 1);
-		} while ((entry = decode_table[key_bits]) >= 0xC000);
-		return entry;
+	/* Index the root table by the next 'table_bits' bits of input. */
+	entry = decode_table[bitstream_peek_bits(is, table_bits)];
+
+	/* Extract the symbol and length from the entry. */
+	sym = entry >> DECODE_TABLE_SYMBOL_SHIFT;
+	len = entry & DECODE_TABLE_LENGTH_MASK;
+
+	/* If the root table is indexed by the full 'max_codeword_len' bits,
+	 * then there cannot be any subtables.  This will be known at compile
+	 * time.  Otherwise, we must check whether the decoded symbol is really
+	 * a subtable pointer.  If so, we must discard the bits with which the
+	 * root table was indexed, then index the subtable by the next 'len'
+	 * bits of input to get the real entry. */
+	if (max_codeword_len > table_bits &&
+	    entry >= (1U << (table_bits + DECODE_TABLE_SYMBOL_SHIFT)))
+	{
+		/* Subtable required */
+		bitstream_remove_bits(is, table_bits);
+		entry = decode_table[sym + bitstream_peek_bits(is, len)];
+		sym = entry >> DECODE_TABLE_SYMBOL_SHIFT;;
+		len = entry & DECODE_TABLE_LENGTH_MASK;
 	}
+
+	/* Discard the bits (or the remaining bits, if a subtable was required)
+	 * of the codeword. */
+	bitstream_remove_bits(is, len);
+
+	/* Return the decoded symbol. */
+	return sym;
 }
+
+/*
+ * The ENOUGH() macro returns the maximum number of decode table entries,
+ * including all subtable entries, that may be required for decoding a given
+ * Huffman code.  This depends on three parameters:
+ *
+ *	num_syms: the maximum number of symbols in the code
+ *	table_bits: the number of bits with which the root table will be indexed
+ *	max_codeword_len: the maximum allowed codeword length
+ *
+ * Given these parameters, the utility program 'enough' from zlib, when run as
+ * './enough num_syms table_bits max_codeword_len', will compute the maximum
+ * number of entries required.  This has already been done for the combinations
+ * we need (or may need) and incorporated into the macro below so that the
+ * mapping can be done at compilation time.  If an unknown combination is used,
+ * then a compilation error will result.  To fix this, use 'enough' to find the
+ * missing value and add it below.
+ */
+#define ENOUGH(num_syms, table_bits, max_codeword_len) ( \
+	((num_syms) == 8 && (table_bits) == 7 && (max_codeword_len) == 15) ? 128 : \
+	((num_syms) == 8 && (table_bits) == 5 && (max_codeword_len) == 7) ? 36 : \
+	((num_syms) == 8 && (table_bits) == 6 && (max_codeword_len) == 7) ? 66 : \
+	((num_syms) == 8 && (table_bits) == 7 && (max_codeword_len) == 7) ? 128 : \
+	((num_syms) == 20 && (table_bits) == 5 && (max_codeword_len) == 15) ? 1062 : \
+	((num_syms) == 20 && (table_bits) == 6 && (max_codeword_len) == 15) ? 582 : \
+	((num_syms) == 20 && (table_bits) == 7 && (max_codeword_len) == 15) ? 390 : \
+	((num_syms) == 54 && (table_bits) == 9 && (max_codeword_len) == 15) ? 618 : \
+	((num_syms) == 54 && (table_bits) == 10 && (max_codeword_len) == 15) ? 1098 : \
+	((num_syms) == 249 && (table_bits) == 9 && (max_codeword_len) == 16) ? 878 : \
+	((num_syms) == 249 && (table_bits) == 10 && (max_codeword_len) == 16) ? 1326 : \
+	((num_syms) == 249 && (table_bits) == 11 && (max_codeword_len) == 16) ? 2318 : \
+	((num_syms) == 256 && (table_bits) == 9 && (max_codeword_len) == 15) ? 822 : \
+	((num_syms) == 256 && (table_bits) == 10 && (max_codeword_len) == 15) ? 1302 : \
+	((num_syms) == 256 && (table_bits) == 11 && (max_codeword_len) == 15) ? 2310 : \
+	((num_syms) == 512 && (table_bits) == 10 && (max_codeword_len) == 15) ? 1558 : \
+	((num_syms) == 512 && (table_bits) == 11 && (max_codeword_len) == 15) ? 2566 : \
+	((num_syms) == 512 && (table_bits) == 12 && (max_codeword_len) == 15) ? 4606 : \
+	((num_syms) == 656 && (table_bits) == 10 && (max_codeword_len) == 16) ? 1734 : \
+	((num_syms) == 656 && (table_bits) == 11 && (max_codeword_len) == 16) ? 2726 : \
+	((num_syms) == 656 && (table_bits) == 12 && (max_codeword_len) == 16) ? 4758 : \
+	((num_syms) == 799 && (table_bits) == 9 && (max_codeword_len) == 15) ? 1366 : \
+	((num_syms) == 799 && (table_bits) == 10 && (max_codeword_len) == 15) ? 1846 : \
+	((num_syms) == 799 && (table_bits) == 11 && (max_codeword_len) == 15) ? 2854 : \
+	-1)
+
+/* Wrapper around ENOUGH() that does additional compile-time validation. */
+#define DECODE_TABLE_LENGTH(num_syms, table_bits, max_codeword_len) (	\
+									\
+	/* Every possible symbol value must fit into the symbol portion	\
+	 * of a decode table entry. */					\
+	STATIC_ASSERT_ZERO((num_syms) <= DECODE_TABLE_MAX_NUM_SYMS) +	\
+									\
+	/* There cannot be more symbols than possible codewords. */	\
+	STATIC_ASSERT_ZERO((num_syms) <= 1U << (max_codeword_len)) +	\
+									\
+	/* It doesn't make sense to use a table_bits more than the	\
+	 * maximum codeword length. */					\
+	STATIC_ASSERT_ZERO((max_codeword_len) >= (table_bits)) +	\
+									\
+	/* The maximum length in the root table	must fit into the	\
+	 * length portion of a decode table entry. */			\
+	STATIC_ASSERT_ZERO((table_bits) <= DECODE_TABLE_MAX_LENGTH) +	\
+									\
+	/* The maximum length in a subtable must fit into the length
+	 * portion of a decode table entry. */				\
+	STATIC_ASSERT_ZERO((max_codeword_len) - (table_bits) <=		\
+					DECODE_TABLE_MAX_LENGTH) +	\
+									\
+	/* The needed 'enough' value must have been defined. */		\
+	STATIC_ASSERT_ZERO(ENOUGH((num_syms), (table_bits),		\
+				  (max_codeword_len)) >= 0) +		\
+									\
+	/* The maximum subtable index must fit in the field which would	\
+	 * normally hold a symbol value. */				\
+	STATIC_ASSERT_ZERO(ENOUGH((num_syms), (table_bits),		\
+				  (max_codeword_len)) <=		\
+					DECODE_TABLE_MAX_NUM_SYMS) +	\
+									\
+	/* The minimum subtable index must be greater than the greatest	\
+	 * possible symbol value. */					\
+	STATIC_ASSERT_ZERO((1U << table_bits) >= num_syms) +		\
+									\
+	ENOUGH(num_syms, table_bits, max_codeword_len)			\
+)
+
+/*
+ * Declare the decode table for a Huffman code, given several compile-time
+ * constants that describe that code (see ENOUGH() for details).
+ *
+ * Decode tables must be aligned to a DECODE_TABLE_ALIGNMENT-boundary.  This
+ * implies that if a decode table is nested a dynamically allocated structure,
+ * then the outer structure must be allocated on a DECODE_TABLE_ALIGNMENT-byte
+ * boundary as well.
+ */
+#define DECODE_TABLE(name, num_syms, table_bits, max_codeword_len) \
+	u16 name[DECODE_TABLE_LENGTH((num_syms), (table_bits), \
+				     (max_codeword_len))] \
+		_aligned_attribute(DECODE_TABLE_ALIGNMENT)
 
 extern int
 make_huffman_decode_table(u16 decode_table[], unsigned num_syms,
-			  unsigned num_bits, const u8 lens[],
+			  unsigned table_bits, const u8 lens[],
 			  unsigned max_codeword_len);
 
 static inline void
@@ -269,17 +366,20 @@ copy_word_unaligned(const void *src, void *dst)
 }
 
 static inline machine_word_t
-repeat_byte(u8 b)
+repeat_u16(u16 b)
 {
-	machine_word_t v;
+	machine_word_t v = b;
 
 	STATIC_ASSERT(WORDBITS == 32 || WORDBITS == 64);
-
-	v = b;
-	v |= v << 8;
 	v |= v << 16;
 	v |= v << ((WORDBITS == 64) ? 32 : 0);
 	return v;
+}
+
+static inline machine_word_t
+repeat_u8(u8 b)
+{
+	return repeat_u16(((u16)b << 8) | b);
 }
 
 /*
@@ -340,7 +440,7 @@ lz_copy(u8 *dst, u32 length, u32 offset, const u8 *winend, u32 min_length)
 			 * encoding of the previous byte.  This case is common
 			 * if the data contains many repeated bytes.  */
 
-			machine_word_t v = repeat_byte(*(dst - 1));
+			machine_word_t v = repeat_u8(*(dst - 1));
 			do {
 				store_word_unaligned(v, dst);
 				src += WORDBYTES;
