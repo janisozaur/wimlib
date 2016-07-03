@@ -237,7 +237,7 @@ read_huffsym(struct input_bitstream *istream, const u16 decode_table[],
 	/* Index the decode table by the next table_bits bits of the input.  */
 	key_bits = bitstream_peek_bits(istream, table_bits);
 	entry = decode_table[key_bits];
-	if (likely(entry < 0xC000)) {
+	if (likely(table_bits >= max_codeword_len || entry < 0xC000)) {
 		/* Fast case: The decode table directly provided the
 		 * symbol and codeword length.  The low 11 bits are the
 		 * symbol, and the high 5 bits are the codeword length.  */
