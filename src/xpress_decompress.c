@@ -75,6 +75,16 @@
 /* This value is chosen for fast decompression.  */
 #define XPRESS_TABLEBITS 12
 
+static void _unused_attribute
+check_enough_value(void)
+{
+/* ./enough 512 12 15 */
+#define XPRESS_ENOUGH 4606
+	STATIC_ASSERT(XPRESS_NUM_SYMBOLS == 512);
+	STATIC_ASSERT(XPRESS_TABLEBITS == 12);
+	STATIC_ASSERT(XPRESS_MAX_CODEWORD_LEN == 15);
+}
+
 static int
 xpress_decompress(const void *restrict compressed_data, size_t compressed_size,
 		  void *restrict uncompressed_data, size_t uncompressed_size,
@@ -85,7 +95,7 @@ xpress_decompress(const void *restrict compressed_data, size_t compressed_size,
 	u8 *out_next = out_begin;
 	u8 * const out_end = out_begin + uncompressed_size;
 	union {
-		u16 decode_table[(1 << XPRESS_TABLEBITS) + 2 * XPRESS_NUM_SYMBOLS]
+		u16 decode_table[XPRESS_ENOUGH]
 				_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 		u8 lens[XPRESS_NUM_SYMBOLS];
 	} u;
