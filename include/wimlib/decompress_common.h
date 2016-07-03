@@ -226,35 +226,25 @@ bitstream_align(struct input_bitstream *is)
  * XXX: This is mostly duplicated in lzms_decode_huffman_symbol() in
  * lzms_decompress.c.  */
 static inline unsigned
-read_huffsym(struct input_bitstream *istream, const u16 decode_table[],
+read_huffsym(struct input_bitstream *is, const u16 decode_table[],
 	     unsigned table_bits, unsigned max_codeword_len)
 {
 	unsigned entry;
-	unsigned key_bits;
 
-	bitstream_ensure_bits(istream, max_codeword_len);
+	bitstream_ensure_bits(is, max_codeword_len);
 
 	/* Index the decode table by the next table_bits bits of the input.  */
-	key_bits = bitstream_peek_bits(istream, table_bits);
-	entry = decode_table[key_bits];
-	if (likely(table_bits >= max_codeword_len || entry < 0xC000)) {
-		/* Fast case: The decode table directly provided the
-		 * symbol and codeword length.  The low 11 bits are the
-		 * symbol, and the high 5 bits are the codeword length.  */
-		bitstream_remove_bits(istream, entry >> 11);
-		return entry & 0x7FF;
-	} else {
-		/* Slow case: The codeword for the symbol is longer than
-		 * table_bits, so the symbol does not have an entry
-		 * directly in the first (1 << table_bits) entries of the
-		 * decode table.  Traverse the appropriate binary tree
-		 * bit-by-bit to decode the symbol.  */
-		bitstream_remove_bits(istream, table_bits);
-		do {
-			key_bits = (entry & 0x3FFF) + bitstream_pop_bits(istream, 1);
-		} while ((entry = decode_table[key_bits]) >= 0xC000);
-		return entry;
+	entry = decode_table[bitstream_peek_bits(is, table_bits)];
+	if (max_codeword_len > table_bits && (entry & 0x8000)) {
+		/* Subtable required */
+		unsigned subtable_start = (entry & 0xFFF);
+		unsigned subtable_bits = (entry >> 12) & 0x7;
+		bitstream_remove_bits(is, table_bits);
+		entry = decode_table[(1U << table_bits) + subtable_start +
+				     bitstream_peek_bits(is, subtable_bits)];
 	}
+	bitstream_remove_bits(is, entry >> 11);
+	return entry & 0x7FF;
 }
 
 extern int

@@ -314,6 +314,40 @@ struct lzms_huffman_rebuild_info {
 	unsigned table_bits;
 };
 
+static void _unused_attribute
+check_enough_values(void)
+{
+/* ./enough 256 10 15 */
+#define LZMS_LITERAL_ENOUGH		1302
+	STATIC_ASSERT(LZMS_NUM_LITERAL_SYMS == 256);
+	STATIC_ASSERT(LZMS_LITERAL_TABLEBITS == 10);
+	STATIC_ASSERT(LZMS_MAX_CODEWORD_LENGTH == 15);
+
+/* ./enough 54 10 15 */
+#define LZMS_LENGTH_ENOUGH		1098
+	STATIC_ASSERT(LZMS_NUM_LENGTH_SYMS == 54);
+	STATIC_ASSERT(LZMS_LENGTH_TABLEBITS == 10);
+	STATIC_ASSERT(LZMS_MAX_CODEWORD_LENGTH == 15);
+
+/* ./enough 799 10 15 */
+#define LZMS_LZ_OFFSET_ENOUGH		1846
+	STATIC_ASSERT(LZMS_MAX_NUM_OFFSET_SYMS == 799);
+	STATIC_ASSERT(LZMS_LZ_OFFSET_TABLEBITS == 10);
+	STATIC_ASSERT(LZMS_MAX_CODEWORD_LENGTH == 15);
+
+/* ./enough 799 10 15 */
+#define LZMS_DELTA_OFFSET_ENOUGH	1846
+	STATIC_ASSERT(LZMS_MAX_NUM_OFFSET_SYMS == 799);
+	STATIC_ASSERT(LZMS_DELTA_OFFSET_TABLEBITS == 10);
+	STATIC_ASSERT(LZMS_MAX_CODEWORD_LENGTH == 15);
+
+/* ./enough 8 7 15 */
+#define LZMS_DELTA_POWER_ENOUGH		128
+	STATIC_ASSERT(LZMS_NUM_DELTA_POWER_SYMS == 8);
+	STATIC_ASSERT(LZMS_DELTA_POWER_TABLEBITS == 7);
+	STATIC_ASSERT(LZMS_MAX_CODEWORD_LENGTH == 15);
+}
+
 struct lzms_decompressor {
 
 	/* 'last_target_usages' is in union with everything else because it is
@@ -323,32 +357,27 @@ struct lzms_decompressor {
 
 	struct lzms_probabilites probs;
 
-	u16 literal_decode_table[(1 << LZMS_LITERAL_TABLEBITS) +
-				 (2 * LZMS_NUM_LITERAL_SYMS)]
+	u16 literal_decode_table[LZMS_LITERAL_ENOUGH]
 		_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u32 literal_freqs[LZMS_NUM_LITERAL_SYMS];
 	struct lzms_huffman_rebuild_info literal_rebuild_info;
 
-	u16 lz_offset_decode_table[(1 << LZMS_LZ_OFFSET_TABLEBITS) +
-				   ( 2 * LZMS_MAX_NUM_OFFSET_SYMS)]
+	u16 lz_offset_decode_table[LZMS_LZ_OFFSET_ENOUGH]
 		_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u32 lz_offset_freqs[LZMS_MAX_NUM_OFFSET_SYMS];
 	struct lzms_huffman_rebuild_info lz_offset_rebuild_info;
 
-	u16 length_decode_table[(1 << LZMS_LENGTH_TABLEBITS) +
-				(2 * LZMS_NUM_LENGTH_SYMS)]
+	u16 length_decode_table[LZMS_LENGTH_ENOUGH]
 		_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u32 length_freqs[LZMS_NUM_LENGTH_SYMS];
 	struct lzms_huffman_rebuild_info length_rebuild_info;
 
-	u16 delta_offset_decode_table[(1 << LZMS_DELTA_OFFSET_TABLEBITS) +
-				      (2 * LZMS_MAX_NUM_OFFSET_SYMS)]
+	u16 delta_offset_decode_table[LZMS_DELTA_OFFSET_ENOUGH]
 		_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u32 delta_offset_freqs[LZMS_MAX_NUM_OFFSET_SYMS];
 	struct lzms_huffman_rebuild_info delta_offset_rebuild_info;
 
-	u16 delta_power_decode_table[(1 << LZMS_DELTA_POWER_TABLEBITS) +
-				     (2 * LZMS_NUM_DELTA_POWER_SYMS)]
+	u16 delta_power_decode_table[LZMS_DELTA_POWER_ENOUGH]
 		_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u32 delta_power_freqs[LZMS_NUM_DELTA_POWER_SYMS];
 	struct lzms_huffman_rebuild_info delta_power_rebuild_info;
@@ -599,33 +628,23 @@ lzms_decode_huffman_symbol(struct lzms_input_bitstream *is, u16 decode_table[],
 			   unsigned table_bits, u32 freqs[],
 			   struct lzms_huffman_rebuild_info *rebuild_info)
 {
-	unsigned key_bits;
 	unsigned entry;
 	unsigned sym;
 
 	lzms_ensure_bits(is, LZMS_MAX_CODEWORD_LENGTH);
 
 	/* Index the decode table by the next table_bits bits of the input.  */
-	key_bits = lzms_peek_bits(is, table_bits);
-	entry = decode_table[key_bits];
-	if (likely(entry < 0xC000)) {
-		/* Fast case: The decode table directly provided the symbol and
-		 * codeword length.  The low 11 bits are the symbol, and the
-		 * high 5 bits are the codeword length.  */
-		lzms_remove_bits(is, entry >> 11);
-		sym = entry & 0x7FF;
-	} else {
-		/* Slow case: The codeword for the symbol is longer than
-		 * table_bits, so the symbol does not have an entry directly in
-		 * the first (1 << table_bits) entries of the decode table.
-		 * Traverse the appropriate binary tree bit-by-bit in order to
-		 * decode the symbol.  */
+	entry = decode_table[lzms_peek_bits(is, table_bits)];
+	if (entry & 0x8000) {
+		/* Subtable required */
+		unsigned subtable_start = (entry & 0xFFF);
+		unsigned subtable_bits = (entry >> 12) & 0x7;
 		lzms_remove_bits(is, table_bits);
-		do {
-			key_bits = (entry & 0x3FFF) + lzms_pop_bits(is, 1);
-		} while ((entry = decode_table[key_bits]) >= 0xC000);
-		sym = entry;
+		entry = decode_table[(1U << table_bits) + subtable_start +
+				     lzms_peek_bits(is, subtable_bits)];
 	}
+	lzms_remove_bits(is, entry >> 11);
+	sym = entry & 0x7FF;
 
 	freqs[sym]++;
 	if (--rebuild_info->num_syms_until_rebuild == 0)

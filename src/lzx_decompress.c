@@ -68,36 +68,59 @@
 #define LZX_PRECODE_TABLEBITS		6
 #define LZX_ALIGNEDCODE_TABLEBITS	7
 
+static void _unused_attribute
+check_enough_values(void)
+{
+/* ./enough 656 11 16 */
+#define LZX_MAINCODE_ENOUGH		2726
+	STATIC_ASSERT(LZX_MAINCODE_MAX_NUM_SYMBOLS == 656);
+	STATIC_ASSERT(LZX_MAINCODE_TABLEBITS == 11);
+	STATIC_ASSERT(LZX_MAX_MAIN_CODEWORD_LEN == 16);
+
+/* ./enough 249 10 16 */
+#define LZX_LENCODE_ENOUGH		1326
+	STATIC_ASSERT(LZX_LENCODE_NUM_SYMBOLS == 249);
+	STATIC_ASSERT(LZX_LENCODE_TABLEBITS == 10);
+	STATIC_ASSERT(LZX_MAX_LEN_CODEWORD_LEN == 16);
+
+/* ./enough 20 6 15 */
+#define LZX_PRECODE_ENOUGH		582
+	STATIC_ASSERT(LZX_PRECODE_NUM_SYMBOLS == 20);
+	STATIC_ASSERT(LZX_PRECODE_TABLEBITS == 6);
+	STATIC_ASSERT(LZX_MAX_PRE_CODEWORD_LEN == 15);
+
+/* ./enough 8 7 7 */
+#define LZX_ALIGNEDCODE_ENOUGH		128
+	STATIC_ASSERT(LZX_ALIGNEDCODE_NUM_SYMBOLS == 8);
+	STATIC_ASSERT(LZX_ALIGNEDCODE_TABLEBITS == 7);
+	STATIC_ASSERT(LZX_MAX_ALIGNED_CODEWORD_LEN == 7);
+}
+
+
 #define LZX_READ_LENS_MAX_OVERRUN 50
 
 /* Reusable heap-allocated memory for LZX decompression */
 struct lzx_decompressor {
 
-	/* Huffman decoding tables, and arrays that map symbols to codeword
-	 * lengths  */
+	/* Huffman decoding tables and codeword lengths */
 
-	u16 maincode_decode_table[(1 << LZX_MAINCODE_TABLEBITS) +
-					(LZX_MAINCODE_MAX_NUM_SYMBOLS * 2)]
-					_aligned_attribute(DECODE_TABLE_ALIGNMENT);
+	u16 maincode_decode_table[LZX_MAINCODE_ENOUGH]
+			_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u8 maincode_lens[LZX_MAINCODE_MAX_NUM_SYMBOLS + LZX_READ_LENS_MAX_OVERRUN];
 
-
-	u16 lencode_decode_table[(1 << LZX_LENCODE_TABLEBITS) +
-					(LZX_LENCODE_NUM_SYMBOLS * 2)]
-					_aligned_attribute(DECODE_TABLE_ALIGNMENT);
+	u16 lencode_decode_table[LZX_LENCODE_ENOUGH]
+			_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 	u8 lencode_lens[LZX_LENCODE_NUM_SYMBOLS + LZX_READ_LENS_MAX_OVERRUN];
 
 	union {
-		u16 alignedcode_decode_table[(1 << LZX_ALIGNEDCODE_TABLEBITS) +
-						(LZX_ALIGNEDCODE_NUM_SYMBOLS * 2)]
-						_aligned_attribute(DECODE_TABLE_ALIGNMENT);
+		u16 alignedcode_decode_table[LZX_ALIGNEDCODE_ENOUGH]
+			_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 		u8 alignedcode_lens[LZX_ALIGNEDCODE_NUM_SYMBOLS];
 	};
 
 	union {
-		u16 precode_decode_table[(1 << LZX_PRECODE_TABLEBITS) +
-					 (LZX_PRECODE_NUM_SYMBOLS * 2)]
-						_aligned_attribute(DECODE_TABLE_ALIGNMENT);
+		u16 precode_decode_table[LZX_PRECODE_ENOUGH]
+			_aligned_attribute(DECODE_TABLE_ALIGNMENT);
 		u8 precode_lens[LZX_PRECODE_NUM_SYMBOLS];
 	};
 

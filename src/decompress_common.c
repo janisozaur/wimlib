@@ -148,7 +148,6 @@ make_huffman_decode_table(u16 decode_table[const],
 	void *decode_table_ptr;
 	unsigned sym_idx;
 	unsigned codeword_len;
-	unsigned decode_table_pos;
 
 	/* Count how many symbols have each codeword length, including 0.  */
 	for (unsigned len = 0; len <= max_codeword_len; len++)
@@ -290,95 +289,78 @@ make_huffman_decode_table(u16 decode_table[const],
 		}
 	}
 
-	/* If we've filled in the entire table, we are done.  Otherwise,
-	 * there are codewords longer than table_bits for which we must
-	 * generate binary trees.  */
+	unsigned codeword = ((u16 *)decode_table_ptr - decode_table) << 1;
+	unsigned cur_subtable_pos = table_num_entries;
+	unsigned cur_subtable_bits = table_bits;
+	unsigned cur_subtable_prefix = -1;
 
-	decode_table_pos = (u16 *)decode_table_ptr - decode_table;
-	if (decode_table_pos != table_num_entries) {
-		unsigned j;
-		unsigned next_free_tree_slot;
-		unsigned cur_codeword;
+	/* Fill in the remaining entries if any.  These entries will require
+	 * subtables. */
+	while (sym_idx < num_syms) {
 
-		/* First, zero out the remaining entries.  This is
-		 * necessary so that these entries appear as
-		 * "unallocated" in the next part.  Each of these entries
-		 * will eventually be filled with the representation of
-		 * the root node of a binary tree.  */
-		j = decode_table_pos;
-		do {
-			decode_table[j] = 0;
-		} while (++j != table_num_entries);
-
-		/* We allocate child nodes starting at the end of the
-		 * direct lookup table.  Note that there should be
-		 * 2*num_syms extra entries for this purpose, although
-		 * fewer than this may actually be needed.  */
-		next_free_tree_slot = table_num_entries;
-
-		/* Iterate through each codeword with length greater than
-		 * 'table_bits', primarily in order of codeword length
-		 * and secondarily in order of symbol.  */
-		for (cur_codeword = decode_table_pos << 1;
-		     codeword_len <= max_codeword_len;
-		     codeword_len++, cur_codeword <<= 1)
-		{
-			unsigned end_sym_idx = sym_idx + len_counts[codeword_len];
-			for (; sym_idx < end_sym_idx; sym_idx++, cur_codeword++)
-			{
-				/* 'sym' is the symbol represented by the
-				 * codeword.  */
-				unsigned sym = sorted_syms[sym_idx];
-
-				unsigned extra_bits = codeword_len - table_bits;
-
-				unsigned node_idx = cur_codeword >> extra_bits;
-
-				/* Go through each bit of the current codeword
-				 * beyond the prefix of length @table_bits and
-				 * walk the appropriate binary tree, allocating
-				 * any slots that have not yet been allocated.
-				 *
-				 * Note that the 'pointer' entry to the binary
-				 * tree, which is stored in the direct lookup
-				 * portion of the table, is represented
-				 * identically to other internal (non-leaf)
-				 * nodes of the binary tree; it can be thought
-				 * of as simply the root of the tree.  The
-				 * representation of these internal nodes is
-				 * simply the index of the left child combined
-				 * with the special bits 0xC000 to distinguish
-				 * the entry from direct mapping and leaf node
-				 * entries.  */
-				do {
-
-					/* At least one bit remains in the
-					 * codeword, but the current node is an
-					 * unallocated leaf.  Change it to an
-					 * internal node.  */
-					if (decode_table[node_idx] == 0) {
-						decode_table[node_idx] =
-							next_free_tree_slot | 0xC000;
-						decode_table[next_free_tree_slot++] = 0;
-						decode_table[next_free_tree_slot++] = 0;
-					}
-
-					/* Go to the left child if the next bit
-					 * in the codeword is 0; otherwise go to
-					 * the right child.  */
-					node_idx = decode_table[node_idx] & 0x3FFF;
-					--extra_bits;
-					node_idx += (cur_codeword >> extra_bits) & 1;
-				} while (extra_bits != 0);
-
-				/* We've traversed the tree using the entire
-				 * codeword, and we're now at the entry where
-				 * the actual symbol will be stored.  This is
-				 * distinguished from internal nodes by not
-				 * having its high two bits set.  */
-				decode_table[node_idx] = sym;
-			}
+		while (len_counts[codeword_len] == 0) {
+			codeword_len++;
+			codeword <<= 1;
 		}
+
+		unsigned prefix = codeword >> (codeword_len - table_bits);
+
+		/* Start a new subtable if the first 'table_bits' bits of the
+		 * codeword don't match the prefix for the previous subtable, or
+		 * if this will be the first subtable. */
+		if (prefix != cur_subtable_prefix) {
+
+			cur_subtable_prefix = prefix;
+
+			/* Calculate the subtable length.  If the codeword
+			 * length exceeds 'table_bits' by n, the subtable needs
+			 * at least 2**n entries.  But it may need more; if
+			 * there are fewer than 2**n codewords of length
+			 * 'table_bits + n' remaining, then n will need to be
+			 * incremented to bring in longer codewords until the
+			 * subtable can be filled completely.  Note that it
+			 * always will, eventually, be possible to fill the
+			 * subtable, since the only case where we may have an
+			 * incomplete code is a single codeword of length 1,
+			 * and that never requires any subtables.  */
+			cur_subtable_bits = codeword_len - table_bits;
+			remainder = (s32)1 << cur_subtable_bits;
+			for (;;) {
+				remainder -= len_counts[table_bits +
+							cur_subtable_bits];
+				if (remainder <= 0)
+					break;
+				cur_subtable_bits++;
+				remainder <<= 1;
+			}
+
+			/* Create the entry that points from the main table to
+			 * the subtable.  This entry contains the index of the
+			 * start of the subtable and the number of bits with
+			 * which the subtable is indexed (the log base 2 of the
+			 * number of entries it contains).  */
+			decode_table[cur_subtable_prefix] =
+				0x8000 | (cur_subtable_bits << 12) |
+				(cur_subtable_pos - table_num_entries);
+		}
+
+		u16 entry = MAKE_DIRECT_ENTRY(sorted_syms[sym_idx],
+					      codeword_len - table_bits);
+		unsigned n = 1 << (cur_subtable_bits - (codeword_len - table_bits));
+
+		do {
+			decode_table[cur_subtable_pos++] = entry;
+		} while (--n);
+
+		/* Advance to the next symbol.  This will either increase the
+		 * codeword length, or keep the same codeword length but
+		 * increase the symbol value.  Note: since we are using
+		 * bit-reversed codewords, we don't need to explicitly append
+		 * zeroes to the codeword when the codeword length increases. */
+		++sym_idx;
+		len_counts[codeword_len]--;
+		codeword++;
 	}
+
 	return 0;
 }
