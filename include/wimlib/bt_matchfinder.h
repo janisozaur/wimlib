@@ -155,12 +155,12 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 {
 	const u8 *in_next = in_begin + cur_pos;
 	u32 depth_remaining = max_search_depth;
-	u32 next_seq4;
-	u32 next_seq3;
+	u32 seq4;
+	u32 seq3;
 	u32 hash3;
 	u32 hash4;
 #ifdef BT_MATCHFINDER_HASH2_ORDER
-	u16 seq2;
+	u32 seq2;
 	u32 hash2;
 #endif
 	STATIC_ASSERT(BT_MATCHFINDER_HASH3_WAYS >= 1 &&
@@ -175,20 +175,19 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	u32 len;
 	u32 best_len = 3;
 
-	next_seq4 = load_u32_unaligned(in_next + 1);
-	next_seq3 = loaded_u32_to_u24(next_seq4);
+	seq4 = load_u32_unaligned(in_next);
+	seq3 = loaded_u32_to_u24(seq4);
+#ifdef BT_MATCHFINDER_HASH2_ORDER
+	seq2 = loaded_u32_to_u16(seq4);
+#endif
 
-	hash3 = next_hashes[0];
-	hash4 = next_hashes[1];
-
-	next_hashes[0] = lz_hash(next_seq3, BT_MATCHFINDER_HASH3_ORDER);
-	next_hashes[1] = lz_hash(next_seq4, BT_MATCHFINDER_HASH4_ORDER);
-	prefetchw(&mf->hash3_tab[next_hashes[0]]);
-	prefetchw(&mf->hash4_tab[next_hashes[1]]);
+	hash4 = lz_hash(seq4, BT_MATCHFINDER_HASH4_ORDER);
+	hash3 = lz_hash(seq3, BT_MATCHFINDER_HASH3_ORDER);
+#ifdef BT_MATCHFINDER_HASH2_ORDER
+	hash2 = lz_hash(seq2, BT_MATCHFINDER_HASH2_ORDER);
+#endif
 
 #ifdef BT_MATCHFINDER_HASH2_ORDER
-	seq2 = load_u16_unaligned(in_next);
-	hash2 = lz_hash(seq2, BT_MATCHFINDER_HASH2_ORDER);
 	cur_node = mf->hash2_tab[hash2];
 	mf->hash2_tab[hash2] = cur_pos;
 	if (record_matches &&
@@ -208,7 +207,6 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 	mf->hash3_tab[hash3][1] = cur_node;
 #endif
 	if (record_matches && likely(in_next != in_begin)) {
-		u32 seq3 = load_u24_unaligned(in_next);
 		if (seq3 == load_u24_unaligned(&in_begin[cur_node])) {
 			lz_matchptr->length = 3;
 			lz_matchptr->offset = in_next - &in_begin[cur_node];
