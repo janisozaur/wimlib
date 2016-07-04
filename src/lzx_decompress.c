@@ -91,10 +91,16 @@ struct lzx_decompressor {
 		DECODE_TABLE(precode_decode_table, LZX_PRECODE_NUM_SYMBOLS,
 			     LZX_PRECODE_TABLEBITS, LZX_MAX_PRE_CODEWORD_LEN);
 		u8 precode_lens[LZX_PRECODE_NUM_SYMBOLS];
+		u8 extra_offset_bits[LZX_MAX_OFFSET_SLOTS];
 	};
 
 	unsigned window_order;
 	unsigned num_main_syms;
+
+	/* Like lzx_extra_offset_bits[], but does not include the entropy-coded
+	 * bits of aligned blocks */
+	u8 extra_offset_bits_minus_aligned[LZX_MAX_OFFSET_SLOTS];
+
 } _aligned_attribute(DECODE_TABLE_ALIGNMENT);
 
 /* Read a Huffman-encoded symbol using the precode. */
@@ -317,18 +323,27 @@ lzx_decompress_block(struct lzx_decompressor *d, struct input_bitstream *is,
 {
 	u8 * const block_end = out_next + block_size;
 	unsigned min_aligned_offset_slot = LZX_MAX_OFFSET_SLOTS;
+	const u8 *src_extra_offset_bits;
 
-	/* Build the Huffman decode tables. */
+	/* Set up the 'extra_offset_bits' array and build the decode tables. */
 
 	if (block_type == LZX_BLOCKTYPE_ALIGNED) {
+
 		if (make_huffman_decode_table(d->alignedcode_decode_table,
 					      LZX_ALIGNEDCODE_NUM_SYMBOLS,
 					      LZX_ALIGNEDCODE_TABLEBITS,
 					      d->alignedcode_lens,
 					      LZX_MAX_ALIGNED_CODEWORD_LEN))
 			return -1;
+
 		min_aligned_offset_slot = 8;
+
+		src_extra_offset_bits = d->extra_offset_bits_minus_aligned;
+	} else {
+		src_extra_offset_bits = lzx_extra_offset_bits;
 	}
+	memcpy(d->extra_offset_bits, src_extra_offset_bits,
+	       sizeof(d->extra_offset_bits));
 
 	if (make_huffman_decode_table(d->lencode_decode_table,
 				      LZX_LENCODE_NUM_SYMBOLS,
@@ -351,7 +366,6 @@ lzx_decompress_block(struct lzx_decompressor *d, struct input_bitstream *is,
 		unsigned length;
 		u32 offset;
 		unsigned offset_slot;
-		unsigned num_extra_bits;
 
 		mainsym = read_mainsym(d, is);
 		if (mainsym < LZX_NUM_CHARS) {
@@ -383,28 +397,12 @@ lzx_decompress_block(struct lzx_decompressor *d, struct input_bitstream *is,
 			recent_offsets[offset_slot] = recent_offsets[0];
 		} else {
 			/* Explicit offset  */
-
-			/* Look up the number of extra bits that need to be read
-			 * to decode offsets with this offset slot.  */
-			num_extra_bits = lzx_extra_offset_bits[offset_slot];
-
-			/* Start with the offset slot base value.  */
-			offset = lzx_offset_slot_base[offset_slot];
-
-			/* In aligned offset blocks, the low-order 3 bits of
-			 * each offset are encoded using the aligned offset
-			 * code.  Otherwise, all the extra bits are literal.  */
-
+			offset = bitstream_read_bits(is, d->extra_offset_bits[offset_slot]);
 			if (offset_slot >= min_aligned_offset_slot) {
-				offset +=
-					bitstream_read_bits(is,
-							    num_extra_bits -
-								LZX_NUM_ALIGNED_OFFSET_BITS)
-							<< LZX_NUM_ALIGNED_OFFSET_BITS;
-				offset += read_alignedsym(d, is);
-			} else {
-				offset += bitstream_read_bits(is, num_extra_bits);
+				offset = (offset << LZX_NUM_ALIGNED_OFFSET_BITS) |
+					 read_alignedsym(d, is);
 			}
+			offset += lzx_offset_slot_base[offset_slot];
 
 			/* Update the match offset LRU queue.  */
 			STATIC_ASSERT(LZX_NUM_RECENT_OFFSETS == 3);
@@ -519,6 +517,19 @@ lzx_create_decompressor(size_t max_block_size, void **d_ret)
 
 	d->window_order = window_order;
 	d->num_main_syms = lzx_get_num_main_syms(window_order);
+
+	/* Initialize 'extra_offset_bits_minus_aligned'. */
+	STATIC_ASSERT(sizeof(lzx_extra_offset_bits[0]) ==
+			sizeof(d->extra_offset_bits_minus_aligned[0]));
+	STATIC_ASSERT(sizeof(lzx_extra_offset_bits[0]) ==
+			sizeof(d->extra_offset_bits[0]));
+	memcpy(d->extra_offset_bits_minus_aligned, lzx_extra_offset_bits,
+	       sizeof(d->extra_offset_bits_minus_aligned));
+	for (unsigned offset_slot = 8; offset_slot < LZX_MAX_OFFSET_SLOTS;
+	     offset_slot++) {
+		d->extra_offset_bits_minus_aligned[offset_slot] -=
+				LZX_NUM_ALIGNED_OFFSET_BITS;
+	}
 
 	*d_ret = d;
 	return 0;
