@@ -116,8 +116,9 @@ xpress_decompress(const void *restrict compressed_data, size_t compressed_size,
 		u32 length;
 		u32 offset;
 
-		sym = read_huffsym(&is, u.decode_table,
-				   XPRESS_TABLEBITS, XPRESS_MAX_CODEWORD_LEN);
+		bitstream_ensure_bits(&is, XPRESS_MAX_CODEWORD_LEN);
+		sym = pop_huffsym(&is, u.decode_table, XPRESS_TABLEBITS,
+				  XPRESS_MAX_CODEWORD_LEN);
 		if (sym < XPRESS_NUM_CHARS) {
 			/* Literal  */
 			*out_next++ = sym;

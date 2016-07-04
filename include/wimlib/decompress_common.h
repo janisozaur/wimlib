@@ -37,10 +37,10 @@ struct input_bitstream {
 
 	/* Bits that have been read from the input buffer.  The bits are
 	 * left-justified; the next bit is always bit 31.  */
-	u32 bitbuf;
+	machine_word_t bitbuf;
 
 	/* Number of bits currently held in @bitbuf.  */
-	u32 bitsleft;
+	machine_word_t bitsleft;
 
 	/* Pointer to the next byte to be retrieved from the input buffer.  */
 	const u8 *next;
@@ -77,26 +77,43 @@ bitstream_ensure_bits(struct input_bitstream *is, const unsigned num_bits)
 	if (is->bitsleft >= num_bits)
 		return;
 
-	if (unlikely(is->end - is->next < 2))
-		goto overflow;
+	/*if (unlikely(is->end - is->next < 6))*/
+		/*goto slow;*/
 
-	is->bitbuf |= (u32)get_unaligned_le16(is->next) << (16 - is->bitsleft);
-	is->next += 2;
-	is->bitsleft += 16;
+	/*is->bitbuf |= (machine_word_t)get_unaligned_le16(is->next + 0) << (WORDBITS - 16 - is->bitsleft);*/
+	/*is->bitbuf |= (machine_word_t)get_unaligned_le16(is->next + 2) << (WORDBITS - 32 - is->bitsleft);*/
+	/*is->bitbuf |= (machine_word_t)get_unaligned_le16(is->next + 4) << (WORDBITS - 48 - is->bitsleft);*/
+	/*is->next += 6;*/
+	/*is->bitsleft += 48;*/
 
-	if (unlikely(num_bits == 17 && is->bitsleft == 16)) {
-		if (unlikely(is->end - is->next < 2))
-			goto overflow;
+	/*return;*/
 
-		is->bitbuf |= (u32)get_unaligned_le16(is->next);
+/*slow:*/
+	if (likely(is->end - is->next >= 2)) {
+		is->bitbuf |=
+			(machine_word_t)get_unaligned_le16(is->next) <<
+			(WORDBITS - 16 - is->bitsleft);
 		is->next += 2;
-		is->bitsleft = 32;
 	}
-
-	return;
-
-overflow:
-	is->bitsleft = 32;
+	is->bitsleft += 16;
+	if (unlikely(num_bits > 16 && is->bitsleft < num_bits)) {
+		if (likely(is->end - is->next >= 2)) {
+			is->bitbuf |=
+				(machine_word_t)get_unaligned_le16(is->next) <<
+				(WORDBITS - 16 - is->bitsleft);
+			is->next += 2;
+		}
+		is->bitsleft += 16;
+		if (unlikely(num_bits > 32 && is->bitsleft < num_bits)) {
+			if (likely(is->end - is->next >= 2)) {
+				is->bitbuf |=
+					(machine_word_t)get_unaligned_le16(is->next) <<
+					(WORDBITS - 16 - is->bitsleft);
+				is->next += 2;
+			}
+			is->bitsleft += 16;
+		}
+	}
 }
 
 /* Return the next @num_bits bits from the bitstream, without removing them.
@@ -105,7 +122,7 @@ overflow:
 static inline u32
 bitstream_peek_bits(const struct input_bitstream *is, const unsigned num_bits)
 {
-	return (is->bitbuf >> 1) >> (sizeof(is->bitbuf) * 8 - num_bits - 1);
+	return (is->bitbuf >> 1) >> (WORDBITS - num_bits - 1);
 }
 
 /* Remove @num_bits from the bitstream.  There must be at least @num_bits
@@ -214,16 +231,12 @@ bitstream_align(struct input_bitstream *is)
  * lzms_decompress.c.
  */
 static inline unsigned
-read_huffsym(struct input_bitstream *is, const u16 decode_table[],
-	     unsigned table_bits, unsigned max_codeword_len)
+pop_huffsym(struct input_bitstream *is, const u16 decode_table[],
+	    unsigned table_bits, unsigned max_codeword_len)
 {
 	unsigned entry;
 	unsigned sym;
 	unsigned len;
-
-	/* If the bitbuffer contains fewer bits than might be required by a
-	 * single codeword, then refill it. */
-	bitstream_ensure_bits(is, max_codeword_len);
 
 	/* Index the root table by the next 'table_bits' bits of input. */
 	entry = decode_table[bitstream_peek_bits(is, table_bits)];
