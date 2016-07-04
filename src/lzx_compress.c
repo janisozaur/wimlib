@@ -2182,21 +2182,21 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 		 */
 	resume_matchfinding:
 		do {
-			if (in_next >= next_search_pos) {
-				/* Search for matches at this position. */
-				struct lz_match *lz_matchptr;
-				u32 best_len;
+			/* Search for matches at this position. */
+			struct lz_match *lz_matchptr;
+			u32 best_len;
 
-				lz_matchptr = CALL_BT_MF(is_16_bit, c,
-							 bt_matchfinder_get_matches,
-							 in_begin,
-							 in_next - in_begin,
-							 max_len,
-							 nice_len,
-							 c->max_search_depth,
-							 next_hashes,
-							 &best_len,
-							 cache_ptr + 1);
+			lz_matchptr = CALL_BT_MF(is_16_bit, c,
+						 bt_matchfinder_get_matches,
+						 in_begin,
+						 in_next - in_begin,
+						 in_next >= next_search_pos? max_len:nice_len,
+						 nice_len,
+						 c->max_search_depth,
+						 next_hashes,
+						 &best_len,
+						 cache_ptr + 1);
+			if (in_next >= next_search_pos) {
 				cache_ptr->length = lz_matchptr - (cache_ptr + 1);
 				cache_ptr = lz_matchptr;
 
@@ -2248,17 +2248,10 @@ lzx_compress_near_optimal(struct lzx_compressor * restrict c,
 				if (best_len >= nice_len)
 					next_search_pos = in_next + best_len;
 			} else {
-				/* Don't search for matches at this position. */
-				CALL_BT_MF(is_16_bit, c,
-					   bt_matchfinder_skip_position,
-					   in_begin,
-					   in_next - in_begin,
-					   nice_len,
-					   c->max_search_depth,
-					   next_hashes);
 				cache_ptr->length = 0;
 				cache_ptr++;
 			}
+
 		} while (++in_next < next_pause_point &&
 			 likely(cache_ptr < &c->match_cache[CACHE_LENGTH]));
 
