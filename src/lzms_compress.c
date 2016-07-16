@@ -181,16 +181,12 @@ check_that_powers_fit_in_bitfield(void)
 struct lzms_adaptive_state {
 
 	/* Recent offsets for LZ matches  */
-	u32 recent_lz_offsets[LZMS_NUM_LZ_REPS + 1];
-	u32 prev_lz_offset; /* 0 means none */
-	u32 upcoming_lz_offset; /* 0 means none */
+	u32 recent_lz_offsets[LZMS_NUM_LZ_REPS];
 
 	/* Recent (power, raw offset) pairs for delta matches.
 	 * The low DELTA_SOURCE_POWER_SHIFT bits of each entry are the raw
 	 * offset, and the high bits are the power.  */
-	u32 recent_delta_pairs[LZMS_NUM_DELTA_REPS + 1];
-	u32 prev_delta_pair; /* 0 means none */
-	u32 upcoming_delta_pair; /* 0 means none  */
+	u32 recent_delta_pairs[LZMS_NUM_DELTA_REPS];
 
 	/* States for predicting the probabilities of item types  */
 	u8 main_state;
@@ -1075,15 +1071,11 @@ lzms_delta_source_cost(const struct lzms_compressor *c, u32 power, u32 raw_offse
 static void
 lzms_init_adaptive_state(struct lzms_adaptive_state *state)
 {
-	for (int i = 0; i < LZMS_NUM_LZ_REPS + 1; i++)
+	for (int i = 0; i < LZMS_NUM_LZ_REPS; i++)
 		state->recent_lz_offsets[i] = i + 1;
-	state->prev_lz_offset = 0;
-	state->upcoming_lz_offset = 0;
 
-	for (int i = 0; i < LZMS_NUM_DELTA_REPS + 1; i++)
+	for (int i = 0; i < LZMS_NUM_DELTA_REPS; i++)
 		state->recent_delta_pairs[i] = i + 1;
-	state->prev_delta_pair = 0;
-	state->upcoming_delta_pair = 0;
 
 	state->main_state = 0;
 	state->match_state = 0;
@@ -1093,33 +1085,6 @@ lzms_init_adaptive_state(struct lzms_adaptive_state *state)
 	state->delta_state = 0;
 	for (int i = 0; i < LZMS_NUM_DELTA_REP_DECISIONS; i++)
 		state->delta_rep_states[i] = 0;
-}
-
-/*
- * Update the LRU queues for match sources when advancing by one item.
- *
- * Note: using LZMA as a point of comparison, the LRU queues in LZMS are more
- * complex because:
- *	- there are separate queues for LZ and delta matches
- *	- updates to the queues are delayed by one encoded item (this prevents
- *	  sources from being bumped up to index 0 too early)
- */
-static void
-lzms_update_lru_queues(struct lzms_adaptive_state *state)
-{
-	if (state->prev_lz_offset != 0) {
-		for (int i = LZMS_NUM_LZ_REPS - 1; i >= 0; i--)
-			state->recent_lz_offsets[i + 1] = state->recent_lz_offsets[i];
-		state->recent_lz_offsets[0] = state->prev_lz_offset;
-	}
-	state->prev_lz_offset = state->upcoming_lz_offset;
-
-	if (state->prev_delta_pair != 0) {
-		for (int i = LZMS_NUM_DELTA_REPS - 1; i >= 0; i--)
-			state->recent_delta_pairs[i + 1] = state->recent_delta_pairs[i];
-		state->recent_delta_pairs[0] = state->prev_delta_pair;
-	}
-	state->prev_delta_pair = state->upcoming_delta_pair;
 }
 
 static forceinline void
@@ -1359,13 +1324,10 @@ begin:
 					c->optimum_nodes[0].state = cur_node->state;
 					cur_node = &c->optimum_nodes[0];
 
-					cur_node->state.upcoming_lz_offset =
-						cur_node->state.recent_lz_offsets[rep_idx];
-					cur_node->state.upcoming_delta_pair = 0;
-					for (int i = rep_idx; i < LZMS_NUM_LZ_REPS; i++)
+					for (int i = rep_idx; i >= 1; i--)
 						cur_node->state.recent_lz_offsets[i] =
-							cur_node->state.recent_lz_offsets[i + 1];
-					lzms_update_lru_queues(&cur_node->state);
+							cur_node->state.recent_lz_offsets[i - 1];
+					cur_node->state.recent_lz_offsets[0] = offset;
 					lzms_update_main_state(&cur_node->state, 1);
 					lzms_update_match_state(&cur_node->state, 0);
 					lzms_update_lz_state(&cur_node->state, 1);
@@ -1512,12 +1474,10 @@ begin:
 					c->optimum_nodes[0].state = cur_node->state;
 					cur_node = &c->optimum_nodes[0];
 
-					cur_node->state.upcoming_delta_pair = pair;
-					cur_node->state.upcoming_lz_offset = 0;
-					for (int i = rep_idx; i < LZMS_NUM_DELTA_REPS; i++)
+					for (int i = rep_idx; i >= 1; i--)
 						cur_node->state.recent_delta_pairs[i] =
-							cur_node->state.recent_delta_pairs[i + 1];
-					lzms_update_lru_queues(&cur_node->state);
+							cur_node->state.recent_delta_pairs[i - 1];
+					cur_node->state.recent_delta_pairs[0] = pair;
 					lzms_update_main_state(&cur_node->state, 1);
 					lzms_update_match_state(&cur_node->state, 1);
 					lzms_update_delta_state(&cur_node->state, 1);
@@ -1585,9 +1545,9 @@ begin:
 				c->optimum_nodes[0].state = cur_node->state;
 				cur_node = &c->optimum_nodes[0];
 
-				cur_node->state.upcoming_lz_offset = offset;
-				cur_node->state.upcoming_delta_pair = 0;
-				lzms_update_lru_queues(&cur_node->state);
+				for (int i = LZMS_NUM_LZ_REPS - 1; i >= 1; i--)
+					cur_node->state.recent_lz_offsets[i] = cur_node->state.recent_lz_offsets[i - 1];
+				cur_node->state.recent_lz_offsets[0] = offset;
 				lzms_update_main_state(&cur_node->state, 1);
 				lzms_update_match_state(&cur_node->state, 0);
 				lzms_update_lz_state(&cur_node->state, 0);
@@ -1784,9 +1744,9 @@ begin:
 					c->optimum_nodes[0].state = cur_node->state;
 					cur_node = &c->optimum_nodes[0];
 
-					cur_node->state.upcoming_lz_offset = 0;
-					cur_node->state.upcoming_delta_pair = pair;
-					lzms_update_lru_queues(&cur_node->state);
+					for (int i = LZMS_NUM_DELTA_REPS - 1; i >= 1; i--)
+						cur_node->state.recent_delta_pairs[i] = cur_node->state.recent_delta_pairs[i - 1];
+					cur_node->state.recent_delta_pairs[0] = pair;
 					lzms_update_main_state(&cur_node->state, 1);
 					lzms_update_match_state(&cur_node->state, 1);
 					lzms_update_delta_state(&cur_node->state, 0);
@@ -1835,10 +1795,7 @@ begin:
 			(cur_node + 1)->num_extra_items = 0;
 		} else if (c->try_lit_lzrep0 && in_end - (in_next + 1) >= 2) {
 			/* try lit + LZ-rep0  */
-			const u32 offset =
-				(cur_node->state.prev_lz_offset) ?
-					cur_node->state.prev_lz_offset :
-					cur_node->state.recent_lz_offsets[0];
+			const u32 offset = cur_node->state.recent_lz_offsets[0];
 
 			if (load_u16_unaligned(in_next + 1) ==
 			    load_u16_unaligned(in_next + 1 - offset))
@@ -1905,8 +1862,6 @@ begin:
 			const u32 length = item_to_take.length;
 			u32 source = item_to_take.source;
 
-			cur_node->state.upcoming_lz_offset = 0;
-			cur_node->state.upcoming_delta_pair = 0;
 			if (length > 1) {
 				/* Match  */
 
@@ -1921,8 +1876,11 @@ begin:
 					if (source >= LZMS_NUM_DELTA_REPS) {
 						/* Explicit offset delta match  */
 						lzms_update_delta_state(&cur_node->state, 0);
-						cur_node->state.upcoming_delta_pair =
-							source - (LZMS_NUM_DELTA_REPS - 1);
+						for (int i = LZMS_NUM_DELTA_REPS - 1; i >= 1; i--) {
+							cur_node->state.recent_delta_pairs[i] =
+								cur_node->state.recent_delta_pairs[i - 1];
+						}
+						cur_node->state.recent_delta_pairs[0] = source - (LZMS_NUM_DELTA_REPS - 1);
 					} else {
 						/* Repeat offset delta match  */
 						int rep_idx = source;
@@ -1930,12 +1888,11 @@ begin:
 						lzms_update_delta_state(&cur_node->state, 1);
 						lzms_update_delta_rep_states(&cur_node->state, rep_idx);
 
-						cur_node->state.upcoming_delta_pair =
-							cur_node->state.recent_delta_pairs[rep_idx];
-
-						for (int i = rep_idx; i < LZMS_NUM_DELTA_REPS; i++)
+						u32 pair = cur_node->state.recent_delta_pairs[rep_idx];
+						for (int i = rep_idx; i >= 1; i--)
 							cur_node->state.recent_delta_pairs[i] =
-								cur_node->state.recent_delta_pairs[i + 1];
+								cur_node->state.recent_delta_pairs[i - 1];
+						cur_node->state.recent_delta_pairs[0] = pair;
 					}
 				} else {
 					lzms_update_match_state(&cur_node->state, 0);
@@ -1943,8 +1900,11 @@ begin:
 					if (source >= LZMS_NUM_LZ_REPS) {
 						/* Explicit offset LZ match  */
 						lzms_update_lz_state(&cur_node->state, 0);
-						cur_node->state.upcoming_lz_offset =
-							source - (LZMS_NUM_LZ_REPS - 1);
+						for (int i = LZMS_NUM_LZ_REPS - 1; i >= 1; i--) {
+							cur_node->state.recent_lz_offsets[i] =
+								cur_node->state.recent_lz_offsets[i - 1];
+						}
+						cur_node->state.recent_lz_offsets[0] = source - (LZMS_NUM_LZ_REPS - 1);
 					} else {
 						/* Repeat offset LZ match  */
 						int rep_idx = source;
@@ -1952,20 +1912,17 @@ begin:
 						lzms_update_lz_state(&cur_node->state, 1);
 						lzms_update_lz_rep_states(&cur_node->state, rep_idx);
 
-						cur_node->state.upcoming_lz_offset =
-							cur_node->state.recent_lz_offsets[rep_idx];
-
-						for (int i = rep_idx; i < LZMS_NUM_LZ_REPS; i++)
+						u32 offset = cur_node->state.recent_lz_offsets[rep_idx];
+						for (int i = rep_idx; i >= 1; i--)
 							cur_node->state.recent_lz_offsets[i] =
-								cur_node->state.recent_lz_offsets[i + 1];
+								cur_node->state.recent_lz_offsets[i - 1];
+						cur_node->state.recent_lz_offsets[0] = offset;
 					}
 				}
 			} else {
 				/* Literal  */
 				lzms_update_main_state(&cur_node->state, 0);
 			}
-
-			lzms_update_lru_queues(&cur_node->state);
 
 			if (next_item_idx < 0)
 				break;

@@ -726,16 +726,8 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 	struct lzms_input_bitstream is;
 
 	/* LRU queues for match sources  */
-	u32 recent_lz_offsets[LZMS_NUM_LZ_REPS + 1];
-	u64 recent_delta_pairs[LZMS_NUM_DELTA_REPS + 1];
-
-	/* Previous item type: 0 = literal, 1 = LZ match, 2 = delta match.
-	 * This is used to handle delayed updates of the LRU queues.  Instead of
-	 * actually delaying the updates, we can check when decoding each rep
-	 * match whether a delayed update needs to be taken into account, and if
-	 * so get the match source from slot 'rep_idx + 1' instead of from slot
-	 * 'rep_idx'.  */
-	unsigned prev_item_type = 0;
+	u32 recent_lz_offsets[LZMS_NUM_LZ_REPS];
+	u64 recent_delta_pairs[LZMS_NUM_DELTA_REPS];
 
 	/* States and probability entries for item type disambiguation  */
 	u32 main_state = 0;
@@ -764,10 +756,10 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 
 	lzms_init_huffman_codes(d, lzms_get_num_offset_slots(out_nbytes));
 
-	for (int i = 0; i < LZMS_NUM_LZ_REPS + 1; i++)
+	for (int i = 0; i < LZMS_NUM_LZ_REPS; i++)
 		recent_lz_offsets[i] = i + 1;
 
-	for (int i = 0; i < LZMS_NUM_DELTA_REPS + 1; i++)
+	for (int i = 0; i < LZMS_NUM_DELTA_REPS; i++)
 		recent_delta_pairs[i] = i + 1;
 
 	/* Main decode loop  */
@@ -778,7 +770,6 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 		{
 			/* Literal  */
 			*out_next++ = lzms_decode_literal(d, &is);
-			prev_item_type = 0;
 
 		} else if (!lzms_decode_bit(&rd, &match_state,
 					    LZMS_NUM_MATCH_PROBS,
@@ -797,7 +788,6 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 				/* Explicit offset  */
 				offset = lzms_decode_lz_offset(d, &is);
 
-				recent_lz_offsets[3] = recent_lz_offsets[2];
 				recent_lz_offsets[2] = recent_lz_offsets[1];
 				recent_lz_offsets[1] = recent_lz_offsets[0];
 			} else {
@@ -807,24 +797,20 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 						     LZMS_NUM_LZ_REP_PROBS,
 						     d->probs.lz_rep[0]))
 				{
-					offset = recent_lz_offsets[0 + (prev_item_type & 1)];
-					recent_lz_offsets[0 + (prev_item_type & 1)] = recent_lz_offsets[0];
+					offset = recent_lz_offsets[0];
 				} else if (!lzms_decode_bit(&rd, &lz_rep_states[1],
 							    LZMS_NUM_LZ_REP_PROBS,
 							    d->probs.lz_rep[1]))
 				{
-					offset = recent_lz_offsets[1 + (prev_item_type & 1)];
-					recent_lz_offsets[1 + (prev_item_type & 1)] = recent_lz_offsets[1];
+					offset = recent_lz_offsets[1];
 					recent_lz_offsets[1] = recent_lz_offsets[0];
 				} else {
-					offset = recent_lz_offsets[2 + (prev_item_type & 1)];
-					recent_lz_offsets[2 + (prev_item_type & 1)] = recent_lz_offsets[2];
+					offset = recent_lz_offsets[2];
 					recent_lz_offsets[2] = recent_lz_offsets[1];
 					recent_lz_offsets[1] = recent_lz_offsets[0];
 				}
 			}
 			recent_lz_offsets[0] = offset;
-			prev_item_type = 1;
 
 			length = lzms_decode_length(d, &is);
 
@@ -857,7 +843,6 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 				raw_offset = lzms_decode_delta_offset(d, &is);
 
 				pair = ((u64)power << 32) | raw_offset;
-				recent_delta_pairs[3] = recent_delta_pairs[2];
 				recent_delta_pairs[2] = recent_delta_pairs[1];
 				recent_delta_pairs[1] = recent_delta_pairs[0];
 			} else {
@@ -865,18 +850,15 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 						     LZMS_NUM_DELTA_REP_PROBS,
 						     d->probs.delta_rep[0]))
 				{
-					pair = recent_delta_pairs[0 + (prev_item_type >> 1)];
-					recent_delta_pairs[0 + (prev_item_type >> 1)] = recent_delta_pairs[0];
+					pair = recent_delta_pairs[0];
 				} else if (!lzms_decode_bit(&rd, &delta_rep_states[1],
 							    LZMS_NUM_DELTA_REP_PROBS,
 							    d->probs.delta_rep[1]))
 				{
-					pair = recent_delta_pairs[1 + (prev_item_type >> 1)];
-					recent_delta_pairs[1 + (prev_item_type >> 1)] = recent_delta_pairs[1];
+					pair = recent_delta_pairs[1];
 					recent_delta_pairs[1] = recent_delta_pairs[0];
 				} else {
-					pair = recent_delta_pairs[2 + (prev_item_type >> 1)];
-					recent_delta_pairs[2 + (prev_item_type >> 1)] = recent_delta_pairs[2];
+					pair = recent_delta_pairs[2];
 					recent_delta_pairs[2] = recent_delta_pairs[1];
 					recent_delta_pairs[1] = recent_delta_pairs[0];
 				}
@@ -885,7 +867,6 @@ lzms_decompress(const void * const restrict in, const size_t in_nbytes,
 				raw_offset = (u32)pair;
 			}
 			recent_delta_pairs[0] = pair;
-			prev_item_type = 2;
 
 			length = lzms_decode_length(d, &is);
 
