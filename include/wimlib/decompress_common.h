@@ -437,6 +437,9 @@ repeat_byte(u8 b)
 	return repeat_u16(((u16)b << 8) | b);
 }
 
+static const unsigned dec32table[] = {4, 1, 2, 1, 4, 4, 4, 4};
+static const int dec64table[] = {0, 0, 0, -1, 0, 1, 2, 3};
+
 /*
  * Copy an LZ77 match of 'length' bytes from the match source at 'out_next -
  * offset' to the match destination at 'out_next'.  The source and destination
@@ -484,61 +487,39 @@ lz_copy(u32 length, u32 offset, u8 *out_begin, u8 *out_next, u8 *out_end,
 		return -1;
 	end = out_next + length;
 
-	/*
-	 * Try to copy one word at a time.  On i386 and x86_64 this is faster
-	 * than copying one byte at a time, unless the data is near-random and
-	 * all the matches have very short lengths.  Note that since this
-	 * requires unaligned memory accesses, it won't necessarily be faster on
-	 * every architecture.
-	 *
-	 * Also note that we might copy more than the length of the match.  For
-	 * example, if a word is 8 bytes and the match is of length 5, then
-	 * we'll simply copy 8 bytes.  This is okay as long as we don't write
-	 * beyond the end of the output buffer, hence the check for (out_end -
-	 * end >= WORDBYTES - 1).
-	 */
-	if (UNALIGNED_ACCESS_IS_FAST && likely(out_end - end >= WORDBYTES - 1))
-	{
-		if (offset >= WORDBYTES) {
-			/* The source and destination words don't overlap. */
-			do {
-				copy_word_unaligned(src, out_next);
-				src += WORDBYTES;
-				out_next += WORDBYTES;
-			} while (out_next < end);
-			return 0;
-		} else if (offset == 1) {
-			/* Offset 1 matches are equivalent to run-length
-			 * encoding of the previous byte.  This case is common
-			 * if the data contains many repeated bytes. */
-			machine_word_t v = repeat_byte(*src);
-			do {
-				store_word_unaligned(v, out_next);
-				out_next += WORDBYTES;
-			} while (out_next < end);
-			return 0;
-		}
-		/*
-		 * We don't bother with special cases for other 'offset <
-		 * WORDBYTES', which are usually rarer than 'offset == 1'.
-		 * Extra checks will just slow things down.  Actually, it's
-		 * possible to handle all the 'offset < WORDBYTES' cases using
-		 * the same code, but it still becomes more complicated doesn't
-		 * seem any faster overall; it definitely slows down the more
-		 * common 'offset == 1' case.
-		 */
+	if (!UNALIGNED_ACCESS_IS_FAST || unlikely(out_end - end < WORDBYTES - 1)) {
+		if (min_length >= 2)
+			*out_next++ = *src++;
+		if (min_length >= 3)
+			*out_next++ = *src++;
+		if (min_length >= 4)
+			*out_next++ = *src++;
+		do {
+			*out_next++ = *src++;
+		} while (out_next != end);
+		return 0;
 	}
 
-	/* Fall back to a bytewise copy.  */
-	if (min_length >= 2)
-		*out_next++ = *src++;
-	if (min_length >= 3)
-		*out_next++ = *src++;
-	if (min_length >= 4)
-		*out_next++ = *src++;
-	do {
-		*out_next++ = *src++;
-	} while (out_next != end);
+	if (unlikely(offset < 8)) {
+		const int dec64 = dec64table[offset];
+		out_next[0] = src[0];
+		out_next[1] = src[1];
+		out_next[2] = src[2];
+		out_next[3] = src[3];
+		src += dec32table[offset];
+		store_u32_unaligned(load_u32_unaligned(src), out_next + 4);
+		src -= dec64;
+	} else {
+		copy_word_unaligned(src, out_next);
+		src += 8;
+	}
+	out_next += 8;
+
+	while (out_next < end) {
+		copy_word_unaligned(src, out_next);
+		src += WORDBYTES;
+		out_next += WORDBYTES;
+	}
 	return 0;
 }
 
