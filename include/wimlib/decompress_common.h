@@ -511,10 +511,9 @@ lz_copy(u32 length, u32 offset, u8 *out_begin, u8 *out_next, u8 *out_end,
 			/* Offset 1 matches are equivalent to run-length
 			 * encoding of the previous byte.  This case is common
 			 * if the data contains many repeated bytes. */
-			machine_word_t v = repeat_byte(*(out_next - 1));
+			machine_word_t v = repeat_byte(*src);
 			do {
 				store_word_unaligned(v, out_next);
-				src += WORDBYTES;
 				out_next += WORDBYTES;
 			} while (out_next < end);
 			return 0;
