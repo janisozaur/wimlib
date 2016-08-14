@@ -8,18 +8,20 @@ wimlib-imagex-capture, wimlib-imagex-append \- Create or append a WIM image
 \fBwimlib-imagex append\fR \fISOURCE\fR \fIWIMFILE\fR [\fIIMAGE_NAME\fR \
 [\fIIMAGE_DESCRIPTION\fR]] [\fIOPTION\fR...]
 .SH DESCRIPTION
-The \fBwimlib-imagex capture\fR and \fBwimlib-imagex append\fR commands
-create a Windows Imaging (WIM) image from a directory tree.  The
-\fBwimlib-imagex capture\fR command creates a new WIM file containing the
-captured image, while the \fBwimlib-imagex append\fR command appends the
-captured image to an existing WIM file.
-These commands are also available as simply \fBwimcapture\fR and \fBwimappend\fR
-if the appropriate hard links or batch files are installed.
+The \fBwimlib-imagex capture\fR and \fBwimlib-imagex append\fR commands create a
+Windows Imaging (WIM) image from a directory tree.  If \fIWIMFILE\fR does not
+yet exist, then the two commands are equivalent, and both create a new WIM
+archive and save the image to it.  Otherwise, \fBwimlib-imagex capture\fR will,
+with confirmation, overwrite the existing WIM archive with a new one; whereas
+\fBwimlib-imagex append\fR will append the new WIM image to the existing WIM
+archive.  These commands are also available as simply \fBwimcapture\fR and
+\fBwimappend\fR if the appropriate hard links or batch files are installed.
 .PP
 Background information: A WIM image is an independent directory tree in a WIM
-file.  A WIM file may contain any number of separate images.  WIM files are
-single-instancing with regards to file data, so a file is stored only one time
-in the entire WIM, regardless of how many images the file appears in.
+archive (or "WIM file")  A WIM archive may contain any number of separate
+images.  WIM archives are single-instancing with regards to file data, so a
+file's data is stored only one time in the entire archive, regardless of how
+many images the file appears in.
 .PP
 \fISOURCE\fR specifies the location of the files to create the new WIM image
 from.  If \fISOURCE\fR is a directory, the WIM image is captured from that
@@ -41,9 +43,9 @@ name already exists in \fIWIMFILE\fR, a unique suffix is added.  Otherwise,
 \fIIMAGE_DESCRIPTION\fR is not specified, no description is given to the new
 image.
 .PP
-As a special case, if \fIWIMFILE\fR is "-", the \fB--pipable\fR option is
-assumed and the WIM file is written to standard output in a special pipable
-format.   See the documentation for \fB--pipable\fR for more details.
+If \fIWIMFILE\fR is "-", the \fB--pipable\fR option is assumed and the WIM file
+is written to standard output in a special pipable format.   See the
+documentation for \fB--pipable\fR for more details.
 .SH DIRECTORY CAPTURE (UNIX)
 This section documents how \fBwimlib-imagex\fR captures files from a
 directory tree on UNIX-like systems.  See \fBDIRECTORY CAPTURE (WINDOWS)\fR for
@@ -181,18 +183,19 @@ problems archiving such files consider using the \fBNTFS VOLUME CAPTURE
 (UNIX)\fR mode from Linux.
 .SH OPTIONS
 .TP 6
+\fB--force\fR
+With \fBwimlib-imagex capture\fR, always overwrite the existing WIM archive; do
+not prompt.
+.TP
 \fB--boot\fR
 Specifies that the new image is to be made the bootable image of the WIM archive.
 .TP
 \fB--check\fR
-For \fBwimlib-imagex append\fR, before performing the append operation,
-check the integrity of \fIWIMFILE\fR if an integrity table is present.
-Furthermore, include an integrity table in the new WIM file
-(\fBwimlib-imagex capture\fR) or the modified WIM file (\fBwimlib-imagex
-append\fR).  If this option is not specified, no integrity table is included in
-a WIM file created with \fBwimlib-imagex capture\fR, while a WIM file
-updated with \fBwimlib-imagex append\fR will be written with an integrity
-table if and only if one was present before.
+For \fBwimlib-imagex append\fR, before performing the append operation, check
+the integrity of \fIWIMFILE\fR if an integrity table is present.  Furthermore,
+include an integrity table in the new or modified WIM archive.  If this option
+is not specified, then an integrity table will be included only when appending
+to an archive that already had an integrity table.
 .TP
 \fB--compress\fR=\fITYPE\fR[:\fILEVEL\fR]
 Specifies the compression format for the new WIM file.  \fITYPE\fR may be
@@ -395,8 +398,8 @@ point inside the directory tree being captured will be adjusted to be absolute
 relative to the root of the directory tree being captured.  When disabled
 (\fB--norpfix\fR), absolute symbolic links will be captured exactly as is.
 .IP ""
-The default behavior for \fBwimlib-imagex capture\fR is equivalent to
-\fB--rpfix\fR.  The default behavior for \fBwimlib-imagex append\fR will be
+The default behavior for creating a new WIM archive is equivalent to
+\fB--rpfix\fR.  The default behavior for appending to an existing WIM archive
 \fB--rpfix\fR if reparse point fixups have previously been done on
 \fIWIMFILE\fR, otherwise \fB--norpfix\fR.
 .IP ""
@@ -482,9 +485,9 @@ WIMs.  The main disadvantages are that appending is (currently) less efficient
 (\fB--rebuild\fR is always implied), and also they aren't compatible with
 Microsoft's software.
 .IP ""
-\fBwimlib-imagex capture\fR and \fBwimlib-imagex append\fR can both
-write a pipable WIM directly to standard output; this is done automatically if
-\fIWIMFILE\fR is specified as "-".  (In that case, \fB--pipable\fR is assumed.)
+\fBwimlib-imagex capture\fR can write a pipable WIM directly to standard output;
+this is done automatically if \fIWIMFILE\fR is specified as "-".  (In that case,
+\fB--pipable\fR is assumed.)
 .TP
 \fB--not-pipable\fR
 Ensure the resulting WIM is in the normal, non-pipable WIM format.  This is the

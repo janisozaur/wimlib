@@ -48,7 +48,7 @@ wimapply()
 
 wimcapture()
 {
-	wimlib_imagex capture "$@" > /dev/null
+	wimlib_imagex capture "$@" --force > /dev/null
 }
 
 wimdelete()

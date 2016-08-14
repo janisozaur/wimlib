@@ -1,4 +1,11 @@
 Version 1.10.0-BETA:
+	'wimcapture' now requires confirmation before overwriting an existing
+	archive.  Scripts that relied on the old behavior will need to add the
+	'--force' option, or delete the existing archive first.
+
+	'wimappend' will now create the WIM archive if it doesn't yet exist
+	(thereby acting like 'wimcapture' in that scenario).
+
 	The LZX compression ratio has been slightly improved.  The default mode,
 	LZX level 50, is now almost as good as the old LZX level 100, while
 	being nearly the same speed as before.

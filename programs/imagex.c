@@ -220,6 +220,7 @@ static const struct option apply_options[] = {
 };
 
 static const struct option capture_or_append_options[] = {
+	{T("force"),       no_argument,       NULL, IMAGEX_FORCE_OPTION},
 	{T("boot"),        no_argument,       NULL, IMAGEX_BOOT_OPTION},
 	{T("check"),       no_argument,       NULL, IMAGEX_CHECK_OPTION},
 	{T("no-check"),    no_argument,       NULL, IMAGEX_NOCHECK_OPTION},
@@ -1825,10 +1826,58 @@ out_usage:
 	goto out_free_refglobs;
 }
 
-/* Create a WIM image from a directory tree, NTFS volume, or multiple files or
- * directory trees.  'wimlib-imagex capture': create a new WIM file containing
- * the desired image.  'wimlib-imagex append': add a new image to an existing
- * WIM file. */
+static int
+handle_wimfile_argument(const tchar *wimfile, bool force, int *cmd_p)
+{
+	struct stat st;
+
+	if (stat(wimfile, &st) == 0) {
+		/* WIM file already exists.  If invoked as 'wimcapture', make
+		 * sure the user is certain about overwriting it. */
+		if (*cmd_p == CMD_CAPTURE && !force) {
+			if (isatty(STDIN_FILENO)) {
+				/* Interactive */
+				tprintf(
+"You invoked 'wimcapture' to create a new WIM archive at the following path:\n"
+"\t%"TS"\n"
+"However, this file already exists.  'wimcapture' can overwrite this file, which\n"
+"will cause this existing file to be permanently lost.  If you actually want to\n"
+"add an image to an existing WIM archive rather than creating a brand new WIM\n"
+"archive, then you should cancel this operation and use 'wimappend' instead of\n"
+"'wimcapture'.  It is also possible to use the '--force' option to suppress this\n"
+"prompt, making 'wimcapture' always overwrite existing files.\n"
+"\n"
+"Proceed with overwrite (y/n)? ", wimfile);
+				if (getchar() != 'y')
+					return -1;
+			} else {
+				/* Noninteractive */
+				imagex_error("\"%"TS"\" already exists.  "
+					     "Refusing to overwrite "
+					     "without --force option.",
+					     wimfile);
+				return -1;
+			}
+		}
+	} else if (errno == ENOENT) {
+		/* WIM file does not yet exist.  Act like 'wimcapture', even if
+		 * invoked as 'wimappend'. */
+		*cmd_p = CMD_CAPTURE;
+	} else {
+		imagex_error_with_errno(T("Error accessing \"%"TS"\""),
+					wimfile);
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * Create a WIM image from a directory tree, NTFS volume, or multiple files or
+ * directory trees.  'wimcapture' creates a new WIM archive to hold the new
+ * image.  'wimappend' appends to the existing WIM archive if there is one,
+ * otherwise (since wimlib v1.10.0) it creates a new one just like 'wimcapture'.
+ */
 static int
 imagex_capture_or_append(int argc, tchar **argv, int cmd)
 {
@@ -1847,6 +1896,7 @@ imagex_capture_or_append(int argc, tchar **argv, int cmd)
 	int wim_fd;
 	const tchar *name;
 	STRING_LIST(image_properties);
+	bool force = false;
 
 	WIMStruct *wim;
 	STRING_LIST(base_wimfiles);
@@ -1986,11 +2036,6 @@ imagex_capture_or_append(int argc, tchar **argv, int cmd)
 			}
 			break;
 		case IMAGEX_DELTA_FROM_OPTION:
-			if (cmd != CMD_CAPTURE) {
-				imagex_error(T("'--delta-from' is only "
-					       "valid for capture!"));
-				goto out_usage;
-			}
 			ret = string_list_append(&base_wimfiles, optarg);
 			if (ret)
 				goto out;
@@ -2000,15 +2045,13 @@ imagex_capture_or_append(int argc, tchar **argv, int cmd)
 			add_flags |= WIMLIB_ADD_FLAG_WIMBOOT;
 			break;
 		case IMAGEX_UNSAFE_COMPACT_OPTION:
-			if (cmd != CMD_APPEND) {
-				imagex_error(T("'--unsafe-compact' is only "
-					       "valid for append!"));
-				goto out_err;
-			}
 			write_flags |= WIMLIB_WRITE_FLAG_UNSAFE_COMPACT;
 			break;
 		case IMAGEX_SNAPSHOT_OPTION:
 			add_flags |= WIMLIB_ADD_FLAG_SNAPSHOT;
+			break;
+		case IMAGEX_FORCE_OPTION:
+			force = true;
 			break;
 		default:
 			goto out_usage;
@@ -2044,26 +2087,42 @@ imagex_capture_or_append(int argc, tchar **argv, int cmd)
 
 	if (!tstrcmp(wimfile, T("-"))) {
 		/* Writing captured WIM to standard output.  */
-	#if 0
-		if (!(write_flags & WIMLIB_WRITE_FLAG_PIPABLE)) {
-			imagex_error("Can't write a non-pipable WIM to "
-				     "standard output!  Specify --pipable\n"
-				     "       if you want to create a pipable WIM "
-				     "(but read the docs first).");
-			goto out_err;
-		}
-	#else
 		write_flags |= WIMLIB_WRITE_FLAG_PIPABLE;
-	#endif
 		if (cmd == CMD_APPEND) {
-			imagex_error(T("Using standard output for append does "
-				       "not make sense."));
+			imagex_error(T("To write a WIM archive to standard "
+				       "output, you must use 'wimcapture', "
+				       "not 'wimappend'."));
 			goto out_err;
 		}
 		wim_fd = STDOUT_FILENO;
 		wimfile = NULL;
 		imagex_info_file = stderr;
 		set_fd_to_binary_mode(wim_fd);
+	} else {
+		ret = handle_wimfile_argument(wimfile, force, &cmd);
+		if (ret)
+			goto out;
+	}
+
+	if ((write_flags & WIMLIB_WRITE_FLAG_SKIP_EXTERNAL_WIMS) &&
+	    cmd != CMD_CAPTURE)
+	{
+		imagex_error(T(
+        "'--delta-from' is only valid when creating a new WIM archive.  Use\n"
+"        'wimcapture' (or 'wimlib-imagex capture') if you want to force creation\n"
+"        of a new WIM archive."));
+		goto out_err;
+	}
+
+	if ((write_flags & WIMLIB_WRITE_FLAG_UNSAFE_COMPACT) &&
+	    cmd != CMD_APPEND)
+	{
+		imagex_error(T(
+	"'--unsafe-compact' is only valid when appending to an existing WIM\n"
+"        archive.  If you want to append to an existing WIM archive, use\n"
+"        'wimappend' (or 'wimlib-imagex append') and pass it the path to an\n"
+"        existing WIM archive."));
+		goto out_err;
 	}
 
 	/* If template image was specified using --update-of=IMAGE rather
@@ -2091,7 +2150,7 @@ imagex_capture_or_append(int argc, tchar **argv, int cmd)
 					       "'--update-of' must specify "
 					       "WIMFILE:IMAGE!"));
 			}
-			goto out_usage;
+			goto out_err;
 		}
 	}
 
@@ -4398,7 +4457,7 @@ T(
 [CMD_CAPTURE] =
 T(
 "    %"TS" " SOURCE_STR " WIMFILE [IMAGE_NAME [IMAGE_DESC]]\n"
-"                    [--compress=TYPE] [--boot] [--check] [--nocheck]\n"
+"                    [--force] [--compress=TYPE] [--boot] [--check] [--nocheck]\n"
 "                    [--config=FILE] [--threads=NUM_THREADS]\n"
 "                    [--no-acls] [--strict-acls] [--rpfix] [--norpfix]\n"
 "                    [--update-of=[WIMFILE:]IMAGE] [--delta-from=WIMFILE]\n"
