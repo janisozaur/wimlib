@@ -1009,12 +1009,7 @@ union wimlib_progress_info {
 		 * is because extraction backends are free to implement an
 		 * extraction algorithm that might be more efficient than
 		 * processing every file in the "extract file structure" and
-		 * "extract file metadata" phases.  For example, the current
-		 * implementation of the UNIX extraction backend will create
-		 * files on-demand during the "extract file data" phase.
-		 * Therefore, when using that particular extraction backend, @p
-		 * end_file_count will only include directories and empty files.
-		 */
+		 * "extract file metadata" phases.  */
 		uint64_t end_file_count;
 	} extract;
 

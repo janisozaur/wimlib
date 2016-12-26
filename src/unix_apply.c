@@ -202,82 +202,39 @@ should_extract_as_directory(const struct wim_inode *inode)
 		!inode_is_symlink(inode);
 }
 
-/* Sets the timestamps on a file being extracted.
- *
- * Either @fd or @path must be specified (not -1 and not NULL, respectively).
- */
+/* Sets the timestamps on a file being extracted. */
 static int
-unix_set_timestamps(int fd, const char *path, u64 atime, u64 mtime)
+unix_set_timestamps(const char *path, u64 atime, u64 mtime)
 {
+#ifdef HAVE_UTIMENSAT
 	{
 		struct timespec times[2];
 
 		times[0] = wim_timestamp_to_timespec(atime);
 		times[1] = wim_timestamp_to_timespec(mtime);
 
-		errno = ENOSYS;
-#ifdef HAVE_FUTIMENS
-		if (fd >= 0 && !futimens(fd, times))
+		if (utimensat(AT_FDCWD, path, times, AT_SYMLINK_NOFOLLOW) == 0)
 			return 0;
-#endif
-#ifdef HAVE_UTIMENSAT
-		if (fd < 0 && !utimensat(AT_FDCWD, path, times, AT_SYMLINK_NOFOLLOW))
-			return 0;
-#endif
 		if (errno != ENOSYS)
-			return WIMLIB_ERR_SET_TIMESTAMPS;
+			return -1;
 	}
+#endif
 	{
 		struct timeval times[2];
 
 		times[0] = wim_timestamp_to_timeval(atime);
 		times[1] = wim_timestamp_to_timeval(mtime);
 
-		if (fd >= 0 && !futimes(fd, times))
-			return 0;
-		if (fd < 0 && !lutimes(path, times))
-			return 0;
-		return WIMLIB_ERR_SET_TIMESTAMPS;
+		return lutimes(path, times);
 	}
 }
 
+/* Set metadata on an extracted file. */
 static int
-unix_set_owner_and_group(int fd, const char *path, uid_t uid, gid_t gid)
+unix_set_metadata(const struct wim_inode *inode, struct unix_apply_ctx *ctx)
 {
-	if (fd >= 0 && !fchown(fd, uid, gid))
-		return 0;
-	if (fd < 0 && !lchown(path, uid, gid))
-		return 0;
-	return WIMLIB_ERR_SET_SECURITY;
-}
-
-static int
-unix_set_mode(int fd, const char *path, mode_t mode)
-{
-	if (fd >= 0 && !fchmod(fd, mode))
-		return 0;
-	if (fd < 0 && !chmod(path, mode))
-		return 0;
-	return WIMLIB_ERR_SET_SECURITY;
-}
-
-/*
- * Set metadata on an extracted file.
- *
- * @fd is an open file descriptor to the extracted file, or -1.  @path is the
- * path to the extracted file, or NULL.  If valid, this function uses @fd.
- * Otherwise, if valid, it uses @path.  Otherwise, it calculates the path to one
- * alias of the extracted file and uses it.
- */
-static int
-unix_set_metadata(int fd, const struct wim_inode *inode,
-		  const char *path, struct unix_apply_ctx *ctx)
-{
-	int ret;
+	const char *path = unix_build_inode_extraction_path(inode, ctx);
 	struct wimlib_unix_data unix_data;
-
-	if (fd < 0 && !path)
-		path = unix_build_inode_extraction_path(inode, ctx);
 
 	if ((ctx->common.extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA)
 	    && inode_get_unix_data(inode, &unix_data))
@@ -286,75 +243,61 @@ unix_set_metadata(int fd, const struct wim_inode *inode,
 		u32 gid = unix_data.gid;
 		u32 mode = unix_data.mode;
 
-		ret = unix_set_owner_and_group(fd, path, uid, gid);
-		if (ret) {
-			if (!path)
-				path = unix_build_inode_extraction_path(inode, ctx);
+		if (lchown(path, uid, gid) != 0) {
 			if (ctx->common.extract_flags &
 			    WIMLIB_EXTRACT_FLAG_STRICT_ACLS)
 			{
 				ERROR_WITH_ERRNO("Can't set uid=%"PRIu32" and "
 						 "gid=%"PRIu32" on \"%s\"",
 						 uid, gid, path);
-				return ret;
-			} else {
-				WARNING_WITH_ERRNO("Can't set uid=%"PRIu32" and "
-						   "gid=%"PRIu32" on \"%s\"",
-						   uid, gid, path);
+				return WIMLIB_ERR_SET_SECURITY;
 			}
+			WARNING_WITH_ERRNO("Can't set uid=%"PRIu32" and "
+					   "gid=%"PRIu32" on \"%s\"",
+					   uid, gid, path);
 		}
 
-		ret = 0;
-		if (!inode_is_symlink(inode))
-			ret = unix_set_mode(fd, path, mode);
-		if (ret) {
-			if (!path)
-				path = unix_build_inode_extraction_path(inode, ctx);
+		if (!inode_is_symlink(inode) && chmod(path, mode) != 0) {
 			if (ctx->common.extract_flags &
 			    WIMLIB_EXTRACT_FLAG_STRICT_ACLS)
 			{
 				ERROR_WITH_ERRNO("Can't set mode=0%"PRIo32" "
 						 "on \"%s\"", mode, path);
-				return ret;
-			} else {
-				WARNING_WITH_ERRNO("Can't set mode=0%"PRIo32" "
-						   "on \"%s\"", mode, path);
+				return WIMLIB_ERR_SET_SECURITY;
 			}
+			WARNING_WITH_ERRNO("Can't set mode=0%"PRIo32" "
+					   "on \"%s\"", mode, path);
 		}
 	}
 
-	ret = unix_set_timestamps(fd, path,
-				  inode->i_last_access_time,
-				  inode->i_last_write_time);
-	if (ret) {
-		if (!path)
-			path = unix_build_inode_extraction_path(inode, ctx);
+	if (unix_set_timestamps(path, inode->i_last_access_time,
+				inode->i_last_write_time) != 0)
+	{
 		if (ctx->common.extract_flags &
 		    WIMLIB_EXTRACT_FLAG_STRICT_TIMESTAMPS)
 		{
 			ERROR_WITH_ERRNO("Can't set timestamps on \"%s\"", path);
-			return ret;
-		} else {
-			WARNING_WITH_ERRNO("Can't set timestamps on \"%s\"", path);
+			return WIMLIB_ERR_SET_TIMESTAMPS;
 		}
+		WARNING_WITH_ERRNO("Can't set timestamps on \"%s\"", path);
 	}
 	return 0;
 }
 
-/* Extract all needed aliases of the @inode, where one alias, corresponding to
- * @first_dentry, has already been extracted to @first_path.  */
+/*
+ * Extract all needed aliases of the specified @inode, where the first alias has
+ * already been extracted to @first_path.
+ */
 static int
 unix_create_hardlinks(const struct wim_inode *inode,
-		      const struct wim_dentry *first_dentry,
 		      const char *first_path, struct unix_apply_ctx *ctx)
 {
 	const struct wim_dentry *dentry;
 	const char *newpath;
 
 	inode_for_each_extraction_alias(dentry, inode) {
-		if (dentry == first_dentry)
+		if (dentry == inode_first_extraction_dentry(inode))
 			continue;
-
 		newpath = unix_build_extraction_path(dentry, ctx);
 	retry_link:
 		if (link(first_path, newpath)) {
@@ -369,18 +312,13 @@ unix_create_hardlinks(const struct wim_inode *inode,
 	return 0;
 }
 
-/* If @dentry represents a directory, create it.  */
 static int
-unix_create_if_directory(const struct wim_dentry *dentry,
-			 struct unix_apply_ctx *ctx)
+unix_create_directory(const struct wim_dentry *dentry,
+		      struct unix_apply_ctx *ctx)
 {
-	const char *path;
+	const char *path = unix_build_extraction_path(dentry, ctx);
 	struct stat stbuf;
 
-	if (!should_extract_as_directory(dentry->d_inode))
-		return 0;
-
-	path = unix_build_extraction_path(dentry, ctx);
 	if (mkdir(path, 0755) &&
 	    /* It's okay if the path already exists, as long as it's a
 	     * directory.  */
@@ -390,38 +328,21 @@ unix_create_if_directory(const struct wim_dentry *dentry,
 		return WIMLIB_ERR_MKDIR;
 	}
 
-	return report_file_created(&ctx->common);
+	return 0;
 }
 
-/* If @dentry represents an empty regular file or a special file, create it, set
- * its metadata, and create any needed hard links.  */
 static int
-unix_extract_if_empty_file(const struct wim_dentry *dentry,
-			   struct unix_apply_ctx *ctx)
+unix_create_nondirectory(const struct wim_inode *inode,
+			 struct unix_apply_ctx *ctx)
 {
-	const struct wim_inode *inode;
+	const char *path = unix_build_inode_extraction_path(inode, ctx);
 	struct wimlib_unix_data unix_data;
-	const char *path;
-	int ret;
-
-	inode = dentry->d_inode;
-
-	/* Extract all aliases only when the "first" comes up.  */
-	if (dentry != inode_first_extraction_dentry(inode))
-		return 0;
-
-	/* Is this a directory, a symbolic link, or any type of nonempty file?
-	 */
-	if (should_extract_as_directory(inode) || inode_is_symlink(inode) ||
-	    inode_get_blob_for_unnamed_data_stream_resolved(inode))
-		return 0;
 
 	/* Recognize special files in UNIX_DATA mode  */
 	if ((ctx->common.extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA) &&
 	    inode_get_unix_data(inode, &unix_data) &&
 	    !S_ISREG(unix_data.mode))
 	{
-		path = unix_build_extraction_path(dentry, ctx);
 	retry_mknod:
 		if (mknod(path, unix_data.mode, unix_data.rdev)) {
 			if (errno == EPERM) {
@@ -436,13 +357,9 @@ unix_extract_if_empty_file(const struct wim_dentry *dentry,
 					 path);
 			return WIMLIB_ERR_MKNOD;
 		}
-		/* On special files, we can set timestamps immediately because
-		 * we don't need to write any data to them.  */
-		ret = unix_set_metadata(-1, inode, path, ctx);
 	} else {
 		int fd;
 
-		path = unix_build_extraction_path(dentry, ctx);
 	retry_create:
 		fd = open(path, O_EXCL | O_CREAT | O_WRONLY | O_NOFOLLOW, 0644);
 		if (fd < 0) {
@@ -451,38 +368,43 @@ unix_extract_if_empty_file(const struct wim_dentry *dentry,
 			ERROR_WITH_ERRNO("Can't create regular file \"%s\"", path);
 			return WIMLIB_ERR_OPEN;
 		}
-		/* On empty files, we can set timestamps immediately because we
-		 * don't need to write any data to them.  */
-		ret = unix_set_metadata(fd, inode, path, ctx);
-		if (close(fd) && !ret) {
+		if (close(fd)) {
 			ERROR_WITH_ERRNO("Error closing \"%s\"", path);
-			ret = WIMLIB_ERR_WRITE;
+			return WIMLIB_ERR_WRITE;
 		}
 	}
-	if (ret)
-		return ret;
 
-	ret = unix_create_hardlinks(inode, dentry, path, ctx);
-	if (ret)
-		return ret;
-
-	return report_file_created(&ctx->common);
+	return unix_create_hardlinks(inode, path, ctx);
 }
 
+/* Create all files (and directories) except for symlinks. */
 static int
-unix_create_dirs_and_empty_files(const struct list_head *dentry_list,
-				 struct unix_apply_ctx *ctx)
+unix_create_file_structure(const struct list_head *dentry_list,
+			   struct unix_apply_ctx *ctx)
 {
 	const struct wim_dentry *dentry;
+	const struct wim_inode *inode;
 	int ret;
 
 	list_for_each_entry(dentry, dentry_list, d_extraction_list_node) {
-		ret = unix_create_if_directory(dentry, ctx);
+		inode = dentry->d_inode;
+		if (!should_extract_as_directory(inode))
+			continue;
+		ret = unix_create_directory(dentry, ctx);
+		if (!ret)
+			ret = report_file_created(&ctx->common);
 		if (ret)
 			return ret;
 	}
 	list_for_each_entry(dentry, dentry_list, d_extraction_list_node) {
-		ret = unix_extract_if_empty_file(dentry, ctx);
+		inode = dentry->d_inode;
+		if (should_extract_as_directory(inode) ||
+		    inode_is_symlink(inode) ||
+		    dentry != inode_first_extraction_dentry(inode))
+			continue;
+		ret = unix_create_nondirectory(inode, ctx);
+		if (!ret)
+			ret = report_file_created(&ctx->common);
 		if (ret)
 			return ret;
 	}
@@ -490,27 +412,21 @@ unix_create_dirs_and_empty_files(const struct list_head *dentry_list,
 }
 
 static void
-unix_count_dentries(const struct list_head *dentry_list,
-		    u64 *dir_count_ret, u64 *empty_file_count_ret)
+unix_count_inodes(const struct list_head *dentry_list,
+		  u64 *full_count, u64 *symlink_count)
 {
 	const struct wim_dentry *dentry;
-	u64 dir_count = 0;
-	u64 empty_file_count = 0;
+
+	*full_count = 0;
+	*symlink_count = 0;
 
 	list_for_each_entry(dentry, dentry_list, d_extraction_list_node) {
-
-		const struct wim_inode *inode = dentry->d_inode;
-
-		if (should_extract_as_directory(inode))
-			dir_count++;
-		else if ((dentry == inode_first_extraction_dentry(inode)) &&
-			 !inode_is_symlink(inode) &&
-			 !inode_get_blob_for_unnamed_data_stream_resolved(inode))
-			empty_file_count++;
+		if (dentry != inode_first_extraction_dentry(dentry->d_inode))
+			continue;
+		++*full_count;
+		if (inode_is_symlink(dentry->d_inode))
+			++*symlink_count;
 	}
-
-	*dir_count_ret = dir_count;
-	*empty_file_count_ret = empty_file_count;
 }
 
 static int
@@ -558,8 +474,7 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 				 const struct wim_inode_stream *strm,
 				 struct unix_apply_ctx *ctx)
 {
-	const struct wim_dentry *first_dentry;
-	const char *first_path;
+	const char *path = unix_build_inode_extraction_path(inode, ctx);
 	int fd;
 
 	if (unlikely(strm->stream_type == STREAM_TYPE_REPARSE_POINT)) {
@@ -568,7 +483,7 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 		if (blob->size > REPARSE_DATA_MAX_SIZE) {
 			ERROR_WITH_ERRNO("Reparse data of \"%s\" has size "
 					 "%"PRIu64" bytes (exceeds %u bytes)",
-					 inode_any_full_path(inode),
+					 path,
 					 blob->size, REPARSE_DATA_MAX_SIZE);
 			return WIMLIB_ERR_INVALID_REPARSE_DATA;
 		}
@@ -583,14 +498,9 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 	/* This should be ensured by extract_blob_list()  */
 	wimlib_assert(ctx->num_open_fds < MAX_OPEN_FILES);
 
-	first_dentry = inode_first_extraction_dentry(inode);
-	first_path = unix_build_extraction_path(first_dentry, ctx);
-retry_create:
-	fd = open(first_path, O_EXCL | O_CREAT | O_WRONLY | O_NOFOLLOW, 0644);
+	fd = open(path, O_WRONLY | O_NOFOLLOW);
 	if (fd < 0) {
-		if (errno == EEXIST && !unlink(first_path))
-			goto retry_create;
-		ERROR_WITH_ERRNO("Can't create regular file \"%s\"", first_path);
+		ERROR_WITH_ERRNO("Can't open regular file \"%s\"", path);
 		return WIMLIB_ERR_OPEN;
 	}
 	if (inode->i_attributes & FILE_ATTRIBUTE_SPARSE_FILE) {
@@ -603,7 +513,7 @@ retry_create:
 #endif
 	}
 	filedes_init(&ctx->open_fds[ctx->num_open_fds++], fd);
-	return unix_create_hardlinks(inode, first_dentry, first_path, ctx);
+	return 0;
 }
 
 /* Called when starting to read a blob for extraction  */
@@ -699,9 +609,6 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 						 "\"%s\"", path);
 				break;
 			}
-			ret = unix_set_metadata(-1, inode, path, ctx);
-			if (ret)
-				break;
 		} else {
 			struct filedes *fd = &ctx->open_fds[j];
 
@@ -712,11 +619,6 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 				ret = WIMLIB_ERR_WRITE;
 				break;
 			}
-
-			/* Set metadata on regular file just before closing.  */
-			ret = unix_set_metadata(fd->fd, inode, NULL, ctx);
-			if (ret)
-				break;
 
 			if (filedes_close(fd)) {
 				ERROR_WITH_ERRNO("Error closing \"%s\"",
@@ -731,21 +633,24 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 	return ret;
 }
 
+/* Apply metadata to all extracted files (and directories). */
 static int
-unix_set_dir_metadata(struct list_head *dentry_list, struct unix_apply_ctx *ctx)
+unix_apply_metadata(struct list_head *dentry_list, struct unix_apply_ctx *ctx)
 {
 	const struct wim_dentry *dentry;
+	const struct wim_inode *inode;
 	int ret;
 
-	list_for_each_entry_reverse(dentry, dentry_list, d_extraction_list_node) {
-		if (should_extract_as_directory(dentry->d_inode)) {
-			ret = unix_set_metadata(-1, dentry->d_inode, NULL, ctx);
-			if (ret)
-				return ret;
+	list_for_each_entry_reverse(dentry, dentry_list, d_extraction_list_node)
+	{
+		inode = dentry->d_inode;
+		if (dentry != inode_first_extraction_dentry(inode))
+			continue;
+		ret = unix_set_metadata(inode, ctx);
+		if (!ret)
 			ret = report_file_metadata_applied(&ctx->common);
-			if (ret)
-				return ret;
-		}
+		if (ret)
+			return ret;
 	}
 	return 0;
 }
@@ -756,8 +661,8 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 	int ret;
 	struct unix_apply_ctx *ctx = (struct unix_apply_ctx *)_ctx;
 	size_t path_max;
-	u64 dir_count;
-	u64 empty_file_count;
+	u64 full_count;
+	u64 symlink_count;
 
 	/* Compute the maximum path length that will be needed, then allocate
 	 * some path buffers.  */
@@ -775,18 +680,38 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 		       ctx->common.target, ctx->common.target_nchars);
 	}
 
-	/* Extract directories and empty regular files.  Directories are needed
-	 * because we can't extract any other files until their directories
-	 * exist.  Empty files are needed because they don't have
-	 * representatives in the blob list.  */
+	/*
+	 * We do the extraction in three phases:
+	 *
+	 *	1. Create all directories and files except for symlinks
+	 *	2. Extract streams
+	 *	3. Apply metadata
+	 *
+	 * In phase (2), the streams which may be extracted include unnamed data
+	 * streams (regular file contents), reparse streams (translated to
+	 * symlink targets), and extended attribute (xattr) streams.  These may
+	 * come up for extraction in any order.  Therefore, at least when xattr
+	 * streams are present, all files must be created earlier, in phase (1).
+	 *
+	 * Symlinks are an exception: they cannot be created until the reparse
+	 * stream comes up for extraction.  Currently we hack around this by
+	 * caching the xattrs of symlinks in memory until they can be applied
+	 * between phases (2) and (3).
+	 *
+	 * Note that phase (3) must happen after all data all xattr extraction
+	 * because it might set the file mode's to readonly (which precludes
+	 * setxattr), and it also will set timestamps including the last
+	 * modification time (which precludes write).
+	 */
 
-	unix_count_dentries(dentry_list, &dir_count, &empty_file_count);
+	unix_count_inodes(dentry_list, &full_count, &symlink_count);
 
-	ret = start_file_structure_phase(&ctx->common, dir_count + empty_file_count);
+	ret = start_file_structure_phase(&ctx->common,
+					 full_count - symlink_count);
 	if (ret)
 		goto out;
 
-	ret = unix_create_dirs_and_empty_files(dentry_list, ctx);
+	ret = unix_create_file_structure(dentry_list, ctx);
 	if (ret)
 		goto out;
 
@@ -806,8 +731,6 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 		ctx->target_abspath_nchars = strlen(ctx->target_abspath);
 	}
 
-	/* Extract nonempty regular files and symbolic links.  */
-
 	struct read_blob_callbacks cbs = {
 		.begin_blob	= unix_begin_extract_blob,
 		.continue_blob	= unix_extract_chunk,
@@ -818,14 +741,11 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 	if (ret)
 		goto out;
 
-
-	/* Set directory metadata.  We do this last so that we get the right
-	 * directory timestamps.  */
-	ret = start_file_metadata_phase(&ctx->common, dir_count);
+	ret = start_file_metadata_phase(&ctx->common, full_count);
 	if (ret)
 		goto out;
 
-	ret = unix_set_dir_metadata(dentry_list, ctx);
+	ret = unix_apply_metadata(dentry_list, ctx);
 	if (ret)
 		goto out;
 
