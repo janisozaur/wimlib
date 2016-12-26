@@ -33,6 +33,9 @@ enum wim_inode_stream_type {
 	 * as well as the encrypted data of all the file's data streams.  */
 	STREAM_TYPE_EFSRPC_RAW_DATA,
 
+	/* Extended attributes originating from Linux (wimlib extension) */
+	STREAM_TYPE_LINUX_XATTR,
+
 	/* Stream type could not be determined  */
 	STREAM_TYPE_UNKNOWN,
 };
@@ -54,6 +57,9 @@ extern const utf16lechar NO_STREAM_NAME[1];
  * one such stream, and it should be unnamed.  However, it is possible for an
  * inode to have both a reparse point stream and an unnamed data stream, and
  * even named data streams as well.
+ *
+ * On Linux, wimlib now also supports storing and restoring extended attributes.
+ * For this an unnamed stream of type STREAM_TYPE_LINUX_XATTR is used.
  */
 struct wim_inode_stream {
 

@@ -63,6 +63,7 @@
 #include "wimlib/unix_data.h"
 #include "wimlib/wim.h"
 #include "wimlib/win32.h" /* for realpath() equivalent */
+#include "wimlib/xattr.h"
 #include "wimlib/xml.h"
 
 #define WIMLIB_EXTRACT_FLAG_FROM_PIPE   0x80000000
@@ -1125,6 +1126,11 @@ ref_stream_if_needed(struct wim_dentry *dentry, struct wim_inode *inode,
 				need_stream = true;
 		}
 		break;
+	case STREAM_TYPE_LINUX_XATTR:
+		if ((ctx->extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA) &&
+		    ctx->supported_features.linux_xattrs)
+			need_stream = true;
+		break;
 	}
 	if (need_stream)
 		return ref_stream(strm, dentry, ctx);
@@ -1224,6 +1230,8 @@ inode_tally_features(const struct wim_inode *inode,
 		features->unix_data++;
 	if (inode_has_object_id(inode))
 		features->object_ids++;
+	if (inode_has_linux_xattr_hash(inode))
+		features->linux_xattrs++;
 }
 
 /* Tally features necessary to extract a dentry and the corresponding inode.  */
@@ -1361,19 +1369,29 @@ do_feature_check(const struct wim_features *required_features,
 		WARNING("Ignoring Windows NT security descriptors of %lu files",
 			required_features->security_descriptors);
 
-	/* UNIX data.  */
+	/* Standard UNIX metadata */
 	if ((extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA) &&
 	    required_features->unix_data && !supported_features->unix_data)
 	{
-		ERROR("Extraction backend does not support UNIX data!");
+		ERROR("Extraction backend does not support standard UNIX "
+		      "metadata (uid/gid/mode/rdev)!");
 		return WIMLIB_ERR_UNSUPPORTED;
 	}
 
 	if (required_features->unix_data &&
 	    !(extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA))
 	{
-		WARNING("Ignoring UNIX metadata of %lu files",
-			required_features->unix_data);
+		WARNING("Ignoring standard UNIX metadata (uid/gid/mode/rdev) "
+			"of %lu files", required_features->unix_data);
+	}
+
+	/* Linux-style extended attributes */
+	if (required_features->linux_xattrs &&
+	    (!supported_features->linux_xattrs ||
+	     !(extract_flags & WIMLIB_EXTRACT_FLAG_UNIX_DATA)))
+	{
+		WARNING("Ignoring Linux-style extended attributes of %lu files",
+			required_features->linux_xattrs);
 	}
 
 	/* Object IDs.  */

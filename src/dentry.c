@@ -68,6 +68,7 @@
 #include "wimlib/endianness.h"
 #include "wimlib/metadata.h"
 #include "wimlib/paths.h"
+#include "wimlib/xattr.h"
 
 /* On-disk format of a WIM dentry (directory entry), located in the metadata
  * resource for a WIM image.  */
@@ -1151,7 +1152,8 @@ assign_stream_types_encrypted(struct wim_inode *inode)
 {
 	for (unsigned i = 0; i < inode->i_num_streams; i++) {
 		struct wim_inode_stream *strm = &inode->i_streams[i];
-		if (!stream_is_named(strm) && !is_zero_hash(strm->_stream_hash))
+		if (strm->stream_type == STREAM_TYPE_UNKNOWN &&
+		    !stream_is_named(strm) && !is_zero_hash(strm->_stream_hash))
 		{
 			strm->stream_type = STREAM_TYPE_EFSRPC_RAW_DATA;
 			return;
@@ -1182,6 +1184,8 @@ assign_stream_types_unencrypted(struct wim_inode *inode)
 	for (unsigned i = 0; i < inode->i_num_streams; i++) {
 		struct wim_inode_stream *strm = &inode->i_streams[i];
 
+		if (strm->stream_type != STREAM_TYPE_UNKNOWN)
+			continue;
 		if (stream_is_named(strm)) {
 			/* Named data stream  */
 			strm->stream_type = STREAM_TYPE_DATA;
@@ -1223,8 +1227,11 @@ setup_inode_streams(const u8 *p, const u8 *end, struct wim_inode *inode,
 		    u64 *offset_p)
 {
 	const u8 *orig_p = p;
+	const u8 *linux_xattr_hash = inode_get_linux_xattr_hash(inode);
+	unsigned i;
 
-	inode->i_num_streams = 1 + num_extra_streams;
+	inode->i_num_streams = 1 + num_extra_streams +
+			       (linux_xattr_hash != NULL);
 
 	if (unlikely(inode->i_num_streams > ARRAY_LEN(inode->i_embedded_streams))) {
 		inode->i_streams = CALLOC(inode->i_num_streams,
@@ -1240,7 +1247,7 @@ setup_inode_streams(const u8 *p, const u8 *end, struct wim_inode *inode,
 	inode->i_streams[0].stream_id = 0;
 
 	/* Read the extra stream entries  */
-	for (unsigned i = 1; i < inode->i_num_streams; i++) {
+	for (i = 1; i < 1 + num_extra_streams; i++) {
 		struct wim_inode_stream *strm;
 		const struct wim_extra_stream_entry_on_disk *disk_strm;
 		u64 length;
@@ -1300,11 +1307,22 @@ setup_inode_streams(const u8 *p, const u8 *end, struct wim_inode *inode,
 		p += length;
 	}
 
-	inode->i_next_stream_id = inode->i_num_streams;
+	/* Set up the xattr stream if there is one (wimlib extension) */
+	if (linux_xattr_hash != NULL) {
+		struct wim_inode_stream *strm = &inode->i_streams[i];
+
+		strm->stream_id = i;
+		strm->stream_type = STREAM_TYPE_LINUX_XATTR;
+		strm->stream_name = (utf16lechar *)NO_STREAM_NAME;
+		copy_hash(strm->_stream_hash, linux_xattr_hash);
+		i++;
+	}
+
+	inode->i_next_stream_id = i;
 
 	/* Now, assign a type to each stream.  Unfortunately this requires
 	 * various hacks because stream types aren't explicitly provided in the
-	 * WIM on-disk format.  */
+	 * WIM on-disk format (except for the wimlib-specific xattr stream) */
 
 	if (unlikely(inode->i_attributes & FILE_ATTRIBUTE_ENCRYPTED))
 		assign_stream_types_encrypted(inode);

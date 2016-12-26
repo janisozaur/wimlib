@@ -11,6 +11,9 @@ struct wim_inode;
 /* [wimlib extension] Standard UNIX metadata: uid, gid, mode, and rdev */
 #define TAG_WIMLIB_UNIX_DATA		0x337DD873
 
+/* [wimlib extension] Hash of stream containing Linux-style xattrs */
+#define TAG_WIMLIB_LINUX_XATTR_HASH	0x337DD874
+
 extern bool
 inode_set_tagged_data(struct wim_inode *inode, u32 tag,
 		      const void *data, u32 len);
