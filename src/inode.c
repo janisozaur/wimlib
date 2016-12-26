@@ -371,9 +371,10 @@ inode_replace_stream_data(struct wim_inode *inode,
  * @blob_table
  *	Pointer to the blob table in which data blobs are being indexed
  *
- * Returns true if successful; false with errno set if unsuccessful.
+ * Returns a pointer to the new stream, or NULL with errno set if it could not
+ * be added.
  */
-bool
+struct wim_inode_stream *
 inode_add_stream_with_data(struct wim_inode *inode,
 			   int stream_type, const utf16lechar *stream_name,
 			   const void *data, size_t size,
@@ -384,18 +385,18 @@ inode_add_stream_with_data(struct wim_inode *inode,
 
 	strm = inode_add_stream(inode, stream_type, stream_name, NULL);
 	if (!strm)
-		return false;
+		return NULL;
 
 	if (size) {
 		blob = new_blob_from_data_buffer(data, size, blob_table);
 		if (unlikely(!blob)) {
 			inode_remove_stream(inode, strm, blob_table);
-			return false;
+			return NULL;
 		}
 	}
 
 	inode_set_stream_blob(inode, strm, blob);
-	return true;
+	return strm;
 }
 
 /*

@@ -359,7 +359,7 @@ inode_replace_stream_data(struct wim_inode *inode,
 			  const void *data, size_t size,
 			  struct blob_table *blob_table);
 
-extern bool
+extern struct wim_inode_stream *
 inode_add_stream_with_data(struct wim_inode *inode,
 			   int stream_type, const utf16lechar *stream_name,
 			   const void *data, size_t size,
