@@ -342,6 +342,8 @@ static const tchar * const error_strings[] = {
 		= T("A file being added to a WIM image was concurrently modified"),
 	[WIMLIB_ERR_SNAPSHOT_FAILURE]
 		= T("Unable to create a filesystem snapshot"),
+	[WIMLIB_ERR_INVALID_EXTENDED_ATTRIBUTE]
+		= T("An extended attribute stream in the WIM is invalid"),
 #ifdef ENABLE_TEST_SUPPORT
 	[WIMLIB_ERR_IMAGES_ARE_DIFFERENT]
 		= T("A difference was detected between the two images being compared"),
