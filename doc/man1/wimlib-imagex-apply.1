@@ -299,9 +299,9 @@ UNIX-like systems.
 \fB--unix-data\fR
 (UNIX-like systems only)  Restore UNIX owners, groups, modes, and device IDs
 (major and minor numbers) that were captured by \fBwimlib-imagex capture\fR with
-the \fB--unix-data\fR option.  Since wimlib v1.7.0, you can backup and restore
-not only the standard UNIX file permission information, but also character
-device nodes, block device nodes, named pipes (FIFOs), and UNIX domain sockets.
+the \fB--unix-data\fR option.  Since wimlib v1.7.0, device nodes, named pipes,
+and socket files are also restored correctly.  Since wimlib v1.11.0, on Linux
+extended attributes are also restored.
 .TP
 \fB--no-acls\fR
 Do not restore security descriptors on extracted files and directories.

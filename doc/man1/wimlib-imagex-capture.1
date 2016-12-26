@@ -67,9 +67,10 @@ nanosecond granularity
 With \fB--unix-data\fR: UNIX owners, groups, and modes
 .IP \[bu]
 With \fB--unix-data\fR: device nodes, FIFOs, and UNIX domain sockets
+.IP \[bu]
+With \fB--unix-data\fR: extended attributes (since wimlib v1.11.0, Linux only)
 .PP
-There is no support for storing extended attributes (e.g. SELinux security
-labels and POSIX ACLs), last status change times (ctimes), or hard link
+There is no support for storing last status change times (ctimes), or hard link
 information for symbolic link files (each symbolic link will be stored as an
 independent file).  In addition, filenames and symbolic link targets on UNIX
 filesystems which are not valid UTF-8 with the addition of surrogate codepoints
@@ -387,17 +388,15 @@ that may be present on the filesystem.
 .TP
 \fB--unix-data\fR
 (UNIX-like systems only) Store the UNIX owner, group, mode, and device ID (major
-and minor number) of each captured file.  Since wimlib v1.7.0, you can backup
-and restore not only the standard UNIX file permission information, but also
-character device nodes, block device nodes, named pipes (FIFOs), and UNIX domain
-sockets.
+and minor number) of each stored file.  Device nodes, named pipes, and socket
+files are also stored.  Since wimlib v1.11.0, on Linux extended attributes are
+also stored.
 .IP
-wimlib stores UNIX data by adding a special tagged metadata item to each
-directory entry of each file that contains this information.  This extra
-information is ignored by the Microsoft implementation.  Note: UNIX data stored
-by wimlib before v1.7.0 used a different format that is no longer supported.  If
-you have old WIM files with UNIX data, apply them with v1.6.2 and recapture them
-with v1.7.0 or later.
+wimlib stores this UNIX-specific metadata in tagged metadata items.  These items
+are ignored by Microsoft's WIM software.  Note: UNIX metadata stored by wimlib
+before v1.7.0 used a different format that is no longer supported.  If you have
+old WIM files with UNIX metadata, apply them with v1.6.2 and recapture them with
+v1.7.0 or later.
 .TP
 \fB--no-acls\fR
 Do not capture files' security descriptors.
