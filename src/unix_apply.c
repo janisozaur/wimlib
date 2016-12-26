@@ -29,6 +29,9 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#ifdef HAVE_SYS_XATTR_H
+#  include <sys/xattr.h>
+#endif
 #include <unistd.h>
 
 #include "wimlib/apply.h"
@@ -40,6 +43,7 @@
 #include "wimlib/reparse.h"
 #include "wimlib/timestamp.h"
 #include "wimlib/unix_data.h"
+#include "wimlib/xattr.h"
 
 /* We don't require O_NOFOLLOW, but the advantage of having it is that if we
  * need to extract a file to a location at which there exists a symbolic link,
@@ -60,6 +64,9 @@ unix_get_supported_features(const char *target,
 	supported_features->unix_data = 1;
 	supported_features->timestamps = 1;
 	supported_features->case_sensitive_filenames = 1;
+#ifdef HAVE_XATTR_SUPPORT
+	supported_features->linux_xattrs = 1;
+#endif
 	return 0;
 }
 
@@ -89,11 +96,15 @@ struct unix_apply_ctx {
 	/* Whether is_sparse_file[] is true for any currently open file  */
 	bool any_sparse_files;
 
-	/* Buffer for reading reparse point data into memory  */
-	u8 reparse_data[REPARSE_DATA_MAX_SIZE];
+	/* Allocated buffer for reading blob data when it cannot be extracted
+	 * directly  */
+	u8 *data_buffer;
 
-	/* Pointer to the next byte in @reparse_data to fill  */
-	u8 *reparse_ptr;
+	/* Pointer to the next byte in @data_buffer to fill  */
+	u8 *data_buffer_ptr;
+
+	/* Size allocated in @data_buffer  */
+	size_t data_buffer_size;
 
 	/* Absolute path to the target directory (allocated buffer).  Only set
 	 * if needed for absolute symbolic link fixups.  */
@@ -104,6 +115,11 @@ struct unix_apply_ctx {
 
 	/* Number of special files we couldn't create due to EPERM  */
 	unsigned long num_special_files_ignored;
+
+#ifdef HAVE_XATTR_SUPPORT
+	/* Delayed xattrs saved in memory (deduplicated)  */
+	struct blob_table *delayed_xattrs;
+#endif
 };
 
 /* Returns the number of characters needed to represent the path to the
@@ -143,6 +159,29 @@ unix_compute_path_max(const struct list_head *dentry_list,
 
 	/* Account for target and null terminator.  */
 	return ctx->common.target_nchars + max + 1;
+}
+
+/* Prepare to read the next blob, which has size @blob_size, into an in-memory
+ * buffer.  */
+static bool
+prepare_data_buffer(struct unix_apply_ctx *ctx, u64 blob_size)
+{
+	if (blob_size > ctx->data_buffer_size) {
+		/* Larger buffer needed.  */
+		void *new_buffer;
+		if ((size_t)blob_size != blob_size)
+			return false;
+		new_buffer = REALLOC(ctx->data_buffer, blob_size);
+		if (!new_buffer)
+			return false;
+		ctx->data_buffer = new_buffer;
+		ctx->data_buffer_size = blob_size;
+	}
+	/* On the first call this changes data_buffer_ptr from NULL, which tells
+	 * unix_extract_chunk() that the data buffer needs to be filled while
+	 * reading the stream data.  */
+	ctx->data_buffer_ptr = ctx->data_buffer;
+	return true;
 }
 
 /* Builds and returns the filesystem path to which to extract @dentry.
@@ -429,6 +468,83 @@ unix_count_inodes(const struct list_head *dentry_list,
 	}
 }
 
+#ifdef HAVE_XATTR_SUPPORT
+
+static int
+apply_xattrs(struct wim_inode *inode, const void *entries,
+	     size_t entries_size, struct unix_apply_ctx *ctx)
+{
+	const void * const entries_end = entries + entries_size;
+	const char *path = unix_build_inode_extraction_path(inode, ctx);
+	char name[XATTR_NAME_MAX + 1];
+
+	for (const struct wimlib_xattr_entry *entry = entries;
+	     (void *)entry < entries_end; entry = xattr_entry_next(entry))
+	{
+		u16 name_len;
+		const void *value;
+		u32 value_len;
+
+		if (!valid_xattr_entry(entry, entries_end - (void *)entry)) {
+			ERROR("\"%s\": extended attribute stream is corrupt",
+				path);
+			return WIMLIB_ERR_INVALID_EXTENDED_ATTRIBUTE;
+		}
+		name_len = le16_to_cpu(entry->name_len);
+		memcpy(name, entry->name, name_len);
+		name[name_len] = '\0';
+
+		value = entry->name + name_len;
+		value_len = le32_to_cpu(entry->value_len);
+
+		if (lsetxattr(path, name, value, value_len, 0) != 0) {
+			if (ctx->common.extract_flags &
+			    WIMLIB_EXTRACT_FLAG_STRICT_ACLS)
+			{
+				ERROR_WITH_ERRNO("\"%s\": unable to set "
+						 "extended attribute %s",
+						 path, name);
+				return WIMLIB_ERR_SET_SECURITY;
+			}
+			WARNING_WITH_ERRNO("\"%s\": unable to set extended "
+					   "attribute %s", path, name);
+		}
+	}
+	return 0;
+}
+
+static int
+apply_delayed_xattrs(struct list_head *dentry_list, struct unix_apply_ctx *ctx)
+{
+	struct wim_dentry *dentry;
+
+	list_for_each_entry(dentry, dentry_list, d_extraction_list_node) {
+		struct wim_inode *inode = dentry->d_inode;
+		const struct blob_descriptor *blob;
+		const struct wim_inode_stream *strm;
+		int ret;
+
+		if (!inode_is_symlink(inode))
+			continue;
+		if (dentry != inode_first_extraction_dentry(inode))
+			continue;
+		strm = inode_get_stream(inode, STREAM_TYPE_LINUX_XATTR,
+					NO_STREAM_NAME);
+		if (!strm)
+			continue;
+		blob = lookup_blob(ctx->delayed_xattrs, stream_hash(strm));
+		if (!blob)
+			continue;
+		wimlib_assert(blob->blob_location == BLOB_IN_ATTACHED_BUFFER);
+		ret = apply_xattrs(inode, blob->attached_buffer, blob->size,
+				   ctx);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+#endif /* HAVE_XATTR_SUPPORT */
+
 static int
 unix_create_symlink(const struct wim_inode *inode, const char *path,
 		    size_t rpdatalen, struct unix_apply_ctx *ctx)
@@ -438,7 +554,7 @@ unix_create_symlink(const struct wim_inode *inode, const char *path,
 	int ret;
 
 	blob_set_is_located_in_attached_buffer(&blob_override,
-					       ctx->reparse_data, rpdatalen);
+					       ctx->data_buffer, rpdatalen);
 
 	ret = wim_inode_readlink(inode, target, sizeof(target) - 1,
 				 &blob_override,
@@ -477,17 +593,13 @@ unix_begin_extract_blob_instance(const struct blob_descriptor *blob,
 	const char *path = unix_build_inode_extraction_path(inode, ctx);
 	int fd;
 
-	if (unlikely(strm->stream_type == STREAM_TYPE_REPARSE_POINT)) {
+	if (strm->stream_type == STREAM_TYPE_REPARSE_POINT ||
+	    strm->stream_type == STREAM_TYPE_LINUX_XATTR) {
 		/* On UNIX, symbolic links must be created with symlink(), which
-		 * requires that the full link target be available.  */
-		if (blob->size > REPARSE_DATA_MAX_SIZE) {
-			ERROR_WITH_ERRNO("Reparse data of \"%s\" has size "
-					 "%"PRIu64" bytes (exceeds %u bytes)",
-					 path,
-					 blob->size, REPARSE_DATA_MAX_SIZE);
-			return WIMLIB_ERR_INVALID_REPARSE_DATA;
-		}
-		ctx->reparse_ptr = ctx->reparse_data;
+		 * requires that the full link target be available.
+		 * Similar for extended attribute "streams".  */
+		if (!prepare_data_buffer(ctx, blob->size))
+			return WIMLIB_ERR_NOMEM;
 		return 0;
 	}
 
@@ -529,7 +641,7 @@ unix_begin_extract_blob(struct blob_descriptor *blob, void *_ctx)
 							   targets[i].stream,
 							   ctx);
 		if (ret) {
-			ctx->reparse_ptr = NULL;
+			ctx->data_buffer_ptr = NULL;
 			unix_cleanup_open_fds(ctx, 0);
 			return ret;
 		}
@@ -567,8 +679,10 @@ unix_extract_chunk(const struct blob_descriptor *blob, u64 offset,
 		}
 	}
 
-	if (ctx->reparse_ptr)
-		ctx->reparse_ptr = mempcpy(ctx->reparse_ptr, chunk, size);
+	/* Copy the data chunk into the buffer (if needed)  */
+	if (ctx->data_buffer_ptr)
+		ctx->data_buffer_ptr = mempcpy(ctx->data_buffer_ptr,
+					       chunk, size);
 	return 0;
 
 err:
@@ -585,7 +699,7 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 	unsigned j;
 	const struct blob_extraction_target *targets = blob_extraction_targets(blob);
 
-	ctx->reparse_ptr = NULL;
+	ctx->data_buffer_ptr = NULL;
 
 	if (status) {
 		unix_cleanup_open_fds(ctx, 0);
@@ -596,8 +710,9 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 	ret = 0;
 	for (u32 i = 0; i < blob->out_refcnt; i++) {
 		struct wim_inode *inode = targets[i].inode;
+		struct wim_inode_stream *strm = targets[i].stream;
 
-		if (inode_is_symlink(inode)) {
+		if (strm->stream_type == STREAM_TYPE_REPARSE_POINT) {
 			/* We finally have the symlink data, so we can create
 			 * the symlink.  */
 			const char *path;
@@ -609,7 +724,41 @@ unix_end_extract_blob(struct blob_descriptor *blob, int status, void *_ctx)
 						 "\"%s\"", path);
 				break;
 			}
-		} else {
+		}
+	#ifdef HAVE_XATTR_SUPPORT
+		else if (strm->stream_type == STREAM_TYPE_LINUX_XATTR) {
+			if (inode_is_symlink(inode)) {
+				/*
+				 * We can't apply xattrs to a symlink until it
+				 * has been created, but that requires the
+				 * reparse stream and we might be given the
+				 * reparse and xattr streams in either order.
+				 * Solution: cache xattrs for symlinks in
+				 * memory, then apply them at the end...
+				 */
+				if (!ctx->delayed_xattrs) {
+					ctx->delayed_xattrs = new_blob_table(32);
+					if (!ctx->delayed_xattrs) {
+						ret = WIMLIB_ERR_NOMEM;
+						break;
+					}
+				}
+				if (!new_blob_from_data_buffer(ctx->data_buffer,
+							       blob->size,
+							       ctx->delayed_xattrs))
+				{
+					ret = WIMLIB_ERR_NOMEM;
+					break;
+				}
+			} else {
+				ret = apply_xattrs(inode, ctx->data_buffer,
+						   blob->size, ctx);
+				if (ret)
+					break;
+			}
+		}
+	#endif /* HAVE_XATTR_SUPPORT */
+		else {
 			struct filedes *fd = &ctx->open_fds[j];
 
 			/* If the file is sparse, extend it to its final size. */
@@ -741,6 +890,14 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 	if (ret)
 		goto out;
 
+#ifdef HAVE_XATTR_SUPPORT
+	if (unlikely(ctx->delayed_xattrs)) {
+		ret = apply_delayed_xattrs(dentry_list, ctx);
+		if (ret)
+			goto out;
+	}
+#endif
+
 	ret = start_file_metadata_phase(&ctx->common, full_count);
 	if (ret)
 		goto out;
@@ -758,6 +915,10 @@ unix_extract(struct list_head *dentry_list, struct apply_ctx *_ctx)
 			ctx->num_special_files_ignored);
 	}
 out:
+#ifdef HAVE_XATTR_SUPPORT
+	free_blob_table(ctx->delayed_xattrs);
+#endif
+	FREE(ctx->data_buffer);
 	for (unsigned i = 0; i < NUM_PATHBUFS; i++)
 		FREE(ctx->pathbufs[i]);
 	FREE(ctx->target_abspath);
