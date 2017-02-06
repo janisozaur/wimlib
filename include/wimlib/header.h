@@ -195,4 +195,6 @@ struct wim_header {
 
 #define WIM_HDR_FLAG_COMPRESS_ZSTD	0x00400000
 
+#define WIM_HDR_FLAG_COMPRESS_DEFLATE	0x00800000
+
 #endif /* _WIMLIB_HEADER_H */

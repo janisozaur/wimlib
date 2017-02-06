@@ -42,6 +42,7 @@ static const struct decompressor_ops * const decompressor_ops[] = {
 	[WIMLIB_COMPRESSION_TYPE_LZMS]   = &lzms_decompressor_ops,
 	[WIMLIB_COMPRESSION_TYPE_LZ4]    = &lz4_decompressor_ops,
 	[WIMLIB_COMPRESSION_TYPE_ZSTD]   = &zstd_decompressor_ops,
+	[WIMLIB_COMPRESSION_TYPE_DEFLATE] = &deflate_decompressor_ops,
 };
 
 static bool

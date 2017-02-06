@@ -92,6 +92,13 @@ static const struct {
 		.default_nonsolid_chunk_size = 131072,
 		.default_solid_chunk_size = 131072,
 	},
+	[WIMLIB_COMPRESSION_TYPE_DEFLATE] = {
+		.name = T("DEFLATE"),
+		.min_chunk_size = 4096,
+		.max_chunk_size = 131072,
+		.default_nonsolid_chunk_size = 32768,
+		.default_solid_chunk_size = 32768,
+	},
 };
 
 /* Is the specified compression type valid?  */
@@ -725,6 +732,8 @@ begin_read(WIMStruct *wim, const void *wim_filename_or_fd, int open_flags)
 			wim->compression_type = WIMLIB_COMPRESSION_TYPE_LZ4;
 		} else if (wim->hdr.flags & WIM_HDR_FLAG_COMPRESS_ZSTD) {
 			wim->compression_type = WIMLIB_COMPRESSION_TYPE_ZSTD;
+		} else if (wim->hdr.flags & WIM_HDR_FLAG_COMPRESS_DEFLATE) {
+			wim->compression_type = WIMLIB_COMPRESSION_TYPE_DEFLATE;
 		} else {
 			return WIMLIB_ERR_INVALID_COMPRESSION_TYPE;
 		}

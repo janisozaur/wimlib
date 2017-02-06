@@ -500,6 +500,7 @@ print_available_compression_types(FILE *fp)
 	"    lzms   (alias: \"recovery\")\n"
 	"    lz4\n"
 	"    zstd   (alias: \"zstandard\")\n"
+	"    deflate\n"
 	"\n"
 	);
 	tfputs(s, fp);
@@ -553,6 +554,8 @@ T(
 	} else if (!tstrcasecmp(optarg, T("zstd")) ||
 		   !tstrcasecmp(optarg, T("zstandard"))) {
 		ctype = WIMLIB_COMPRESSION_TYPE_ZSTD;
+	} else if (!tstrcasecmp(optarg, T("deflate"))) {
+		ctype = WIMLIB_COMPRESSION_TYPE_DEFLATE;
 	} else if (!tstrcasecmp(optarg, T("none"))) {
 		ctype = WIMLIB_COMPRESSION_TYPE_NONE;
 	} else {

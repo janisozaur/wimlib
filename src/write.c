@@ -2774,6 +2774,10 @@ write_wim_part(WIMStruct *wim,
 			WARNING("Zstandard support is for benchmarking purposes only!");
 			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_ZSTD;
 			break;
+		case WIMLIB_COMPRESSION_TYPE_DEFLATE:
+			WARNING("DEFLATE support is for benchmarking purposes only!");
+			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_DEFLATE;
+			break;
 		}
 	}
 

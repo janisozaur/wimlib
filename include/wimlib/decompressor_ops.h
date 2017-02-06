@@ -27,5 +27,6 @@ extern const struct decompressor_ops xpress_decompressor_ops;
 extern const struct decompressor_ops lzms_decompressor_ops;
 extern const struct decompressor_ops lz4_decompressor_ops;
 extern const struct decompressor_ops zstd_decompressor_ops;
+extern const struct decompressor_ops deflate_decompressor_ops;
 
 #endif /* _WIMLIB_DECOMPRESSOR_OPS_H */

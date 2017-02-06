@@ -10,6 +10,7 @@ AM_CPPFLAGS	= -I$(top_srcdir)/include $(PLATFORM_CPPFLAGS)	\
 		  -I$(top_srcdir)/src/zstd/common		\
 		  -I$(top_srcdir)/src/zstd/compress		\
 		  -I$(top_srcdir)/src/zstd/decompress		\
+		  -I$(top_srcdir)/src/libdeflate		\
 		  -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
 # Note: -std=gnu99 instead of -std=c99 is needed for unnamed structs and unions,
@@ -47,6 +48,7 @@ libwim_la_SOURCES =		\
 	src/compress_serial.c	\
 	src/decompress.c	\
 	src/decompress_common.c	\
+	src/deflate_glue.c	\
 	src/delete_image.c	\
 	src/dentry.c		\
 	src/divsufsort.c	\
@@ -112,6 +114,39 @@ libwim_la_SOURCES =		\
 	src/zstd/decompress/zstd_decompress.c \
 	src/zstd/zstd.h	\
 	src/zstd_glue.c	\
+	src/libdeflate/common_defs.h	\
+	src/libdeflate/compiler_gcc.h	\
+	src/libdeflate/compiler_msc.h	\
+	src/libdeflate/adler32.c	\
+	src/libdeflate/aligned_malloc.c	\
+	src/libdeflate/crc32.c	\
+	src/libdeflate/deflate_compress.c	\
+	src/libdeflate/deflate_decompress.c	\
+	src/libdeflate/gzip_compress.c	\
+	src/libdeflate/gzip_decompress.c	\
+	src/libdeflate/x86_cpu_features.c	\
+	src/libdeflate/zlib_compress.c	\
+	src/libdeflate/zlib_decompress.c	\
+	src/libdeflate/adler32.h	\
+	src/libdeflate/adler32_impl.h	\
+	src/libdeflate/aligned_malloc.h	\
+	src/libdeflate/bt_matchfinder.h	\
+	src/libdeflate/crc32.h	\
+	src/libdeflate/crc32_table.h	\
+	src/libdeflate/decompress_impl.h	\
+	src/libdeflate/deflate_compress.h	\
+	src/libdeflate/deflate_constants.h	\
+	src/libdeflate/gzip_constants.h	\
+	src/libdeflate/hc_matchfinder.h	\
+	src/libdeflate/lib_common.h	\
+	src/libdeflate/matchfinder_avx2.h	\
+	src/libdeflate/matchfinder_common.h	\
+	src/libdeflate/matchfinder_neon.h	\
+	src/libdeflate/matchfinder_sse2.h	\
+	src/libdeflate/unaligned.h	\
+	src/libdeflate/x86_cpu_features.h	\
+	src/libdeflate/zlib_constants.h	\
+	src/libdeflate/libdeflate.h	\
 	src/solid.c		\
 	src/split.c		\
 	src/tagged_items.c	\
