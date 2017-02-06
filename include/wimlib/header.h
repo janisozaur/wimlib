@@ -188,6 +188,8 @@ struct wim_header {
  * v1.6.0 and later and WIMGAPI Windows 8 and later.  */
 #define WIM_HDR_FLAG_COMPRESS_LZMS      0x00080000
 
+#define WIM_HDR_FLAG_COMPRESS_LZ4	0x00100000
+
 /* XPRESS, with small chunk size???  */
 #define WIM_HDR_FLAG_COMPRESS_XPRESS_2	0x00200000
 

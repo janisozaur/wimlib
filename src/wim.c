@@ -78,6 +78,13 @@ static const struct {
 		.default_nonsolid_chunk_size = 131072,
 		.default_solid_chunk_size = 67108864,
 	},
+	[WIMLIB_COMPRESSION_TYPE_LZ4] = {
+		.name = T("LZ4"),
+		.min_chunk_size = 4096,
+		.max_chunk_size = 131072,
+		.default_nonsolid_chunk_size = 65536,
+		.default_solid_chunk_size = 65536,
+	},
 };
 
 /* Is the specified compression type valid?  */
@@ -707,6 +714,8 @@ begin_read(WIMStruct *wim, const void *wim_filename_or_fd, int open_flags)
 			wim->compression_type = WIMLIB_COMPRESSION_TYPE_XPRESS;
 		} else if (wim->hdr.flags & WIM_HDR_FLAG_COMPRESS_LZMS) {
 			wim->compression_type = WIMLIB_COMPRESSION_TYPE_LZMS;
+		} else if (wim->hdr.flags & WIM_HDR_FLAG_COMPRESS_LZ4) {
+			wim->compression_type = WIMLIB_COMPRESSION_TYPE_LZ4;
 		} else {
 			return WIMLIB_ERR_INVALID_COMPRESSION_TYPE;
 		}

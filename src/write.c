@@ -2766,6 +2766,10 @@ write_wim_part(WIMStruct *wim,
 		case WIMLIB_COMPRESSION_TYPE_LZMS:
 			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_LZMS;
 			break;
+		case WIMLIB_COMPRESSION_TYPE_LZ4:
+			WARNING("LZ4 support is for benchmarking purposes only!");
+			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_LZ4;
+			break;
 		}
 	}
 

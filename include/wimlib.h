@@ -565,6 +565,8 @@ enum wimlib_compression_type {
 	 * up to and including <c>2^30</c>.
 	 */
 	WIMLIB_COMPRESSION_TYPE_LZMS = 3,
+
+	WIMLIB_COMPRESSION_TYPE_LZ4 = 4,
 };
 
 /** @} */

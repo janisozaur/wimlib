@@ -59,6 +59,11 @@ libwim_la_SOURCES =		\
 	src/iterate_dir.c	\
 	src/join.c		\
 	src/lcpit_matchfinder.c	\
+	src/lz4_glue.c		\
+	src/lz4.c		\
+	src/lz4.h		\
+	src/lz4hc.c		\
+	src/lz4hc.h		\
 	src/lzms_common.c	\
 	src/lzms_compress.c	\
 	src/lzms_decompress.c	\
