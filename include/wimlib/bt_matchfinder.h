@@ -148,7 +148,7 @@ TEMPLATED(bt_matchfinder_advance_one_byte)(struct TEMPLATED(bt_matchfinder) * co
 					   const u32 max_len,
 					   const u32 nice_len,
 					   const u32 max_search_depth,
-					   u32 next_hashes[const restrict static 2],
+					   u32 next_hashes[restrict 2],
 					   u32 * const restrict best_len_ret,
 					   struct lz_match * restrict lz_matchptr,
 					   const bool record_matches)
@@ -330,7 +330,7 @@ TEMPLATED(bt_matchfinder_get_matches)(struct TEMPLATED(bt_matchfinder) *mf,
 				      u32 max_len,
 				      u32 nice_len,
 				      u32 max_search_depth,
-				      u32 next_hashes[static 2],
+				      u32 next_hashes[restrict 2],
 				      u32 *best_len_ret,
 				      struct lz_match *lz_matchptr)
 {
@@ -358,7 +358,7 @@ TEMPLATED(bt_matchfinder_skip_position)(struct TEMPLATED(bt_matchfinder) *mf,
 					ptrdiff_t cur_pos,
 					u32 nice_len,
 					u32 max_search_depth,
-					u32 next_hashes[static 2])
+					u32 next_hashes[2])
 {
 	u32 best_len;
 	TEMPLATED(bt_matchfinder_advance_one_byte)(mf,

@@ -192,7 +192,7 @@ TEMPLATED(hc_matchfinder_longest_match)(struct TEMPLATED(hc_matchfinder) * const
 					const u32 max_len,
 					const u32 nice_len,
 					const u32 max_search_depth,
-					u32 next_hashes[const restrict static 2],
+					u32 next_hashes[restrict 2],
 					u32 * const restrict offset_ret)
 {
 	const u8 *in_next = in_begin + cur_pos;
@@ -359,7 +359,7 @@ TEMPLATED(hc_matchfinder_skip_positions)(struct TEMPLATED(hc_matchfinder) * cons
 					 const ptrdiff_t cur_pos,
 					 const ptrdiff_t end_pos,
 					 const u32 count,
-					 u32 next_hashes[const restrict static 2])
+					 u32 next_hashes[restrict 2])
 {
 	const u8 *in_next = in_begin + cur_pos;
 	const u8 * const stop_ptr = in_next + count;
