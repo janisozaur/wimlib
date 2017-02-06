@@ -2770,6 +2770,10 @@ write_wim_part(WIMStruct *wim,
 			WARNING("LZ4 support is for benchmarking purposes only!");
 			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_LZ4;
 			break;
+		case WIMLIB_COMPRESSION_TYPE_ZSTD:
+			WARNING("Zstandard support is for benchmarking purposes only!");
+			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_ZSTD;
+			break;
 		}
 	}
 

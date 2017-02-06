@@ -33,5 +33,6 @@ extern const struct compressor_ops lzx_compressor_ops;
 extern const struct compressor_ops xpress_compressor_ops;
 extern const struct compressor_ops lzms_compressor_ops;
 extern const struct compressor_ops lz4_compressor_ops;
+extern const struct compressor_ops zstd_compressor_ops;
 
 #endif /* _WIMLIB_COMPRESSOR_OPS_H */

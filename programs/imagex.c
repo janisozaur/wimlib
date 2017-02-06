@@ -499,6 +499,7 @@ print_available_compression_types(FILE *fp)
 	"    lzx    (alias: \"maximum\") (default for capture)\n"
 	"    lzms   (alias: \"recovery\")\n"
 	"    lz4\n"
+	"    zstd   (alias: \"zstandard\")\n"
 	"\n"
 	);
 	tfputs(s, fp);
@@ -549,6 +550,9 @@ T(
 		ctype = WIMLIB_COMPRESSION_TYPE_LZMS;
 	} else if (!tstrcasecmp(optarg, T("lz4"))) {
 		ctype = WIMLIB_COMPRESSION_TYPE_LZ4;
+	} else if (!tstrcasecmp(optarg, T("zstd")) ||
+		   !tstrcasecmp(optarg, T("zstandard"))) {
+		ctype = WIMLIB_COMPRESSION_TYPE_ZSTD;
 	} else if (!tstrcasecmp(optarg, T("none"))) {
 		ctype = WIMLIB_COMPRESSION_TYPE_NONE;
 	} else {

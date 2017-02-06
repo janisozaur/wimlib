@@ -567,6 +567,8 @@ enum wimlib_compression_type {
 	WIMLIB_COMPRESSION_TYPE_LZMS = 3,
 
 	WIMLIB_COMPRESSION_TYPE_LZ4 = 4,
+
+	WIMLIB_COMPRESSION_TYPE_ZSTD = 5,
 };
 
 /** @} */

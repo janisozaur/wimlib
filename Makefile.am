@@ -6,6 +6,10 @@
 ACLOCAL_AMFLAGS = -I m4
 
 AM_CPPFLAGS	= -I$(top_srcdir)/include $(PLATFORM_CPPFLAGS)	\
+		  -I$(top_srcdir)/src/zstd			\
+		  -I$(top_srcdir)/src/zstd/common		\
+		  -I$(top_srcdir)/src/zstd/compress		\
+		  -I$(top_srcdir)/src/zstd/decompress		\
 		  -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
 # Note: -std=gnu99 instead of -std=c99 is needed for unnamed structs and unions,
@@ -83,6 +87,31 @@ libwim_la_SOURCES =		\
 	src/scan.c		\
 	src/security.c		\
 	src/sha1.c		\
+	src/zstd/common/bitstream.h \
+	src/zstd/common/entropy_common.c \
+	src/zstd/common/error_private.c \
+	src/zstd/common/error_private.h \
+	src/zstd/common/error_public.h \
+	src/zstd/common/fse_decompress.c \
+	src/zstd/common/fse.h \
+	src/zstd/common/huf.h \
+	src/zstd/common/mem.h \
+	src/zstd/common/xxhash.c \
+	src/zstd/common/xxhash.h \
+	src/zstd/common/zbuff.h \
+	src/zstd/common/zstd_common.c \
+	src/zstd/common/zstd_errors.h \
+	src/zstd/common/zstd_internal.h \
+	src/zstd/compress/fse_compress.c \
+	src/zstd/compress/huf_compress.c \
+	src/zstd/compress/zbuff_compress.c \
+	src/zstd/compress/zstd_compress.c \
+	src/zstd/compress/zstd_opt.h \
+	src/zstd/decompress/huf_decompress.c \
+	src/zstd/decompress/zbuff_decompress.c \
+	src/zstd/decompress/zstd_decompress.c \
+	src/zstd/zstd.h	\
+	src/zstd_glue.c	\
 	src/solid.c		\
 	src/split.c		\
 	src/tagged_items.c	\

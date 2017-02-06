@@ -43,6 +43,7 @@ static const struct compressor_ops * const compressor_ops[] = {
 	[WIMLIB_COMPRESSION_TYPE_LZX]    = &lzx_compressor_ops,
 	[WIMLIB_COMPRESSION_TYPE_LZMS]   = &lzms_compressor_ops,
 	[WIMLIB_COMPRESSION_TYPE_LZ4]    = &lz4_compressor_ops,
+	[WIMLIB_COMPRESSION_TYPE_ZSTD]   = &zstd_compressor_ops,
 };
 
 /* Scale: 10 = low, 50 = medium, 100 = high */
