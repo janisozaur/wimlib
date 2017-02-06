@@ -139,7 +139,7 @@ sort_symbols(unsigned num_syms, const u32 freqs[restrict],
 
 	unsigned counters[num_counters];
 
-	memset(counters, 0, sizeof(counters));
+	memset(counters, 0, num_counters * sizeof(counters[0]));
 
 	/* Count the frequencies.  */
 	for (unsigned sym = 0; sym < num_syms; sym++)
