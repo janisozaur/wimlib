@@ -221,6 +221,27 @@ else
 fi
 AM_CONDITIONAL([ENABLE_SSSE3_SHA1], [test "$ENABLE_SSSE3_SHA1" = "yes"])
 
+# --------------------------- Zstandard support -------------------------------
+
+AC_MSG_CHECKING([whether to include support for Zstandard compression])
+AC_ARG_WITH([zstd],
+	    [AS_HELP_STRING([--with-zstd],
+			    [Zstandard compression support via libzstd
+			     (EXPERIMENTAL)])],
+	    [WITH_ZSTD=$withval],
+	    [WITH_ZSTD=no])
+AC_MSG_RESULT([$WITH_ZSTD])
+
+if test "$WITH_ZSTD" = "yes" ; then
+	PKG_CHECK_MODULES([LIBZSTD], [libzstd], [],
+		[AC_MSG_ERROR([Cannot find libzstd!  Either install libzstd, or
+		 configure --without-zstd to disable Zstandard compression
+		 support.])])
+	PKGCONFIG_PRIVATE_REQUIRES="$PKGCONFIG_PRIVATE_REQUIRES zstd"
+	AC_DEFINE([WITH_ZSTD], [1], [Define to 1 if using Zstandard support])
+fi
+AM_CONDITIONAL([WITH_ZSTD], [test "$WITH_ZSTD" = "yes"])
+
 # ----------------------------- Other options ---------------------------------
 
 AC_MSG_CHECKING([whether to include error messages])

@@ -568,6 +568,18 @@ enum wimlib_compression_type {
 	 * up to and including <c>2^30</c>.
 	 */
 	WIMLIB_COMPRESSION_TYPE_LZMS = 3,
+
+	/**
+	 * The Zstandard compression format.  This is a wimlib extension;
+	 * Microsoft's WIMGAPI does not support this format.  Zstandard supports
+	 * chunk sizes from 4096 to 268435456 bytes, with the default being
+	 * 131072.  Multiple compression levels are supported as well.  For
+	 * consistency with wimlib's other compression types, the compression
+	 * levels exposed by libzstd are multiplied by 5; e.g., wimlib's level
+	 * 50 (the default level) corresponds to libzstd's level 10.  libzstd
+	 * allows levels 1 through 22.
+	 */
+	WIMLIB_COMPRESSION_TYPE_ZSTD = 4,
 };
 
 /** @} */

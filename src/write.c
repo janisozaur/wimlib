@@ -2767,6 +2767,10 @@ write_wim_part(WIMStruct *wim,
 		case WIMLIB_COMPRESSION_TYPE_LZMS:
 			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_LZMS;
 			break;
+		case WIMLIB_COMPRESSION_TYPE_ZSTD:
+			WARNING("Zstandard support is experimental -- use only for benchmarking!");
+			wim->out_hdr.flags |= WIM_HDR_FLAG_COMPRESS_ZSTD;
+			break;
 		}
 	}
 

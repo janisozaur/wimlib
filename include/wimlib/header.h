@@ -191,4 +191,6 @@ struct wim_header {
 /* XPRESS, with small chunk size???  */
 #define WIM_HDR_FLAG_COMPRESS_XPRESS_2	0x00200000
 
+#define WIM_HDR_FLAG_COMPRESS_ZSTD	0x00400000
+
 #endif /* _WIMLIB_HEADER_H */

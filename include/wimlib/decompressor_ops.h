@@ -25,5 +25,6 @@ struct decompressor_ops {
 extern const struct decompressor_ops lzx_decompressor_ops;
 extern const struct decompressor_ops xpress_decompressor_ops;
 extern const struct decompressor_ops lzms_decompressor_ops;
+extern const struct decompressor_ops zstd_decompressor_ops;
 
 #endif /* _WIMLIB_DECOMPRESSOR_OPS_H */

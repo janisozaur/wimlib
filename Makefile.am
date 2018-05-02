@@ -164,6 +164,11 @@ libwim_la_SOURCES += src/ntfs-3g_apply.c	\
 		     include/wimlib/ntfs_3g.h
 endif
 
+if WITH_ZSTD
+libwim_la_SOURCES += src/zstd_compress.c		\
+		     src/zstd_decompress.c
+endif
+
 if WINDOWS_NATIVE_BUILD
 libwim_la_SOURCES += src/wimboot.c			\
 		     src/win32_common.c			\
@@ -199,6 +204,7 @@ libwim_la_CFLAGS =		\
 	$(LIBXML2_CFLAGS)	\
 	$(LIBNTFS_3G_CFLAGS)	\
 	$(LIBFUSE_CFLAGS)	\
+	$(LIBZSTD_CFLAGS)	\
 	$(LIBCRYPTO_CFLAGS)
 
 libwim_la_LDFLAGS = $(AM_LDFLAGS) -version-info 29:0:14
@@ -209,6 +215,7 @@ libwim_la_LIBADD =		\
 	$(LIBNTFS_3G_LIBS)	\
 	$(LIBFUSE_LIBS)		\
 	$(LIBRT_LIBS)		\
+	$(LIBZSTD_LIBS)		\
 	$(LIBCRYPTO_LIBS)	\
 	$(PLATFORM_LIBS)
 
